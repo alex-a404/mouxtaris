@@ -64,6 +64,13 @@ func (u *UserRepositoryImpl) Unsubscribe(ctx context.Context, telegramID int64, 
 	return err
 }
 
+// DeleteUser removes the user row outright; subscriptions cascade via the
+// ON DELETE CASCADE FK in schema.sql, so no separate cleanup is needed.
+func (u *UserRepositoryImpl) DeleteUser(ctx context.Context, telegramID int64) error {
+	_, err := u.db.Exec(ctx, `DELETE FROM users WHERE telegram_id = $1`, telegramID)
+	return err
+}
+
 func (u *UserRepositoryImpl) ListSubscriptions(ctx context.Context, telegramID int64) ([]SubscriptionInfo, error) {
 	const q = `
 		SELECT s.area_key, a.name_en

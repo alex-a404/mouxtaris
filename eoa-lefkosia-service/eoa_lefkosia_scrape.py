@@ -1,50 +1,4 @@
-"""
-EOA Lefkosia / NDLGO (ndlgo.org.cy) water-interruption scraper.
-
-Unlike EOA Pafos, this is NOT a WordPress post feed -- it's a single page
-(https://ndlgo.org.cy/water-supply/breakdowns-maintenance/) with three
-Elementor/PowerPack HTML <table>s that always show the CURRENTLY ACTIVE
-situation:
-
-  - "Έκτακτη Διακοπή Ύδρευσης"          (emergency breakdown)   -> fault
-  - "Προγραμματισμένες Διακοπές Ύδρευσης" (scheduled interruption) -> scheduled
-  - "Τρέχουσες Βλάβες"                   (current breakdowns)   -> fault
-
-Rows disappear from these tables once resolved -- there's no post id, no
-permalink, no publish date. That means this scraper must push the FULL
-current snapshot every cycle (like aik-service/eac_scrape.py), not just
-new items (like eoa_pafos_scrape.py): the Go dispatcher's Reconcile() marks
-anything absent from a push's payload as resolved, so pushing only deltas
-would wrongly resolve still-open outages on the very next cycle.
-
-No WAF/cookie gate was found on this host (plain GETs return 200), and
-both /wp-json/ and any /feed/ path are unusable (401 / 404) -- so this is
-plain HTML table scraping.
-
-Discovery (scrape the 3 tables into rows) is separate from extraction (ask
-a local LLM to turn each Greek row into structured fields) is separate from
-push (POST the full current snapshot to /ingest/eoa, same shape as
-/ingest/eac, outage_type "water"). The LLM's job is narrow: normalize the
-town name, split out street/zone detail, and resolve dates (DD/MM/YY(YY),
-or phrases like "εντός της ημέρας") into YYYY-MM-DD -- outage_cause is
-assigned deterministically from which table a row came from, not inferred.
-
-A row's LLM extraction is cached by a content hash (there's no stable id to
-key on), so an unchanged row costs zero LLM calls on later cycles -- but
-the snapshot pushed each cycle always contains every row currently on the
-page, cache hit or not.
-
-Env:
-  INGEST_URL     e.g. http://localhost:8080/ingest/eoa
-  INGEST_TOKEN   shared secret, sent as X-Ingest-Token (must match Oracle)
-  OLLAMA_URL     default http://localhost:11434
-  OLLAMA_MODEL   default qwen2.5:7b-instruct
-  CACHE_STORE    path to the row-extraction cache (default: eoa_lefkosia_cache.json,
-                 next to this script)
-
-  python eoa_lefkosia_scrape.py             # loop forever, push every cycle
-  python eoa_lefkosia_scrape.py --once      # single pass, then exit
-"""
+# EOA Lefkosia / NDLGO (ndlgo.org.cy) water-interruption scraper.
 
 import argparse, json, os, random, re, sys, time
 from datetime import date, datetime
@@ -80,14 +34,9 @@ RETRIES = 4
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
-# CPU inference is slow, and a cold model load alone can take minutes -- keep
-# the read timeout generous and configurable (see eoa_pafos_scrape.py, which
-# hit this in production).
 LLM_TIMEOUT = httpx.Timeout(
     connect=5.0, read=float(os.environ.get("OLLAMA_TIMEOUT", "600")), write=10.0, pool=10.0
 )
-# Keep the model resident between calls so a poll cycle after the first
-# doesn't pay a cold-load again.
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 
 TZ = ZoneInfo("Asia/Nicosia")
@@ -395,8 +344,6 @@ def cycle(ingest_url: str, ingest_token: str) -> None:
     if not payloads:
         print(f"[{now_str()}] 0 active outage(s)", file=sys.stderr)
 
-    # Always push the full current snapshot (even empty), so Reconcile()
-    # correctly resolves anything that just disappeared from the page.
     push(ingest_url, ingest_token, payloads)
 
 

@@ -24,13 +24,6 @@ func NewAreaRepository(db *pgxpool.Pool) *AreaRepositoryImpl {
 	return &AreaRepositoryImpl{db: db}
 }
 
-// UpsertAreas loads the gazetteer into Postgres so that subscriptions.area_key
-// (which has a foreign key to areas.key) can reference it.
-//
-// This runs in two passes because parent_key is self-referencing: a row may
-// name a parent that hasn't been inserted yet in gazetteer order. The first
-// pass inserts/updates every row with parent_key left NULL; the second pass
-// fills in parent_key now that every key is guaranteed to exist.
 func (a *AreaRepositoryImpl) UpsertAreas(ctx context.Context, areas []AreaSeed) error {
 	tx, err := a.db.Begin(ctx)
 	if err != nil {

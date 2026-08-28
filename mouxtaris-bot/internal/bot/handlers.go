@@ -28,6 +28,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.cmdUnsubscribe(ctx, msg)
 	case "list":
 		b.cmdList(ctx, msg)
+	case "delete_me":
+		b.cmdDeleteMe(ctx, msg)
 	}
 }
 
@@ -64,6 +66,14 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 			return
 		}
 		b.editToText(chatID, msgID, "Subscription removed.")
+
+	case cb.Data == "delete_me:confirm":
+		if err := b.store.DeleteUser(ctx, chatID); err != nil {
+			log.Printf("bot: delete user chat=%d: %v", chatID, err)
+			b.editToText(chatID, msgID, "Something went wrong. Please try again.")
+			return
+		}
+		b.editToText(chatID, msgID, "Your data has been deleted. Send /start if you'd like to use the bot again.")
 	}
 }
 
@@ -78,7 +88,8 @@ func (b *Bot) cmdStart(ctx context.Context, msg *tgbotapi.Message) {
 			"Get notified when power cuts affect your area in Cyprus.\n\n"+
 			"/subscribe &lt;area&gt; — add an area (e.g. /subscribe Strovolos)\n"+
 			"/list — view your subscriptions\n"+
-			"/unsubscribe — remove a subscription",
+			"/unsubscribe — remove a subscription\n"+
+			"/delete_me — delete your account and all your data",
 	)
 }
 
@@ -169,4 +180,17 @@ func (b *Bot) cmdList(ctx context.Context, msg *tgbotapi.Message) {
 		fmt.Fprintf(&sb, "• %s\n", s.NameEN)
 	}
 	b.send(msg.Chat.ID, sb.String())
+}
+
+func (b *Bot) cmdDeleteMe(ctx context.Context, msg *tgbotapi.Message) {
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Delete my data", "delete_me:confirm"),
+			tgbotapi.NewInlineKeyboardButtonData("Cancel", "cancel"),
+		),
+	)
+	b.sendWithKeyboard(msg.Chat.ID,
+		"This will delete your account and all your subscriptions. This cannot be undone.",
+		kb,
+	)
 }

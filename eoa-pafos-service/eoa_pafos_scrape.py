@@ -1,38 +1,4 @@
-"""
-EOA Pafos (eoap.org.cy) water-interruption announcement scraper.
-
-The site's WAF returns a 403 shell to any request without a session cookie
--- this is not an IP block, a plain GET fails identically everywhere. Fix:
-warm up with a GET to the root first (in a client that persists cookies),
-then request the real page in the same session.
-
-The category page's REST API is separately locked down by a plugin
-("DRA: Only authenticated users can access the REST API", 401, regardless
-of cookies) -- not usable. But the category RSS feed *does* work once
-warmed up, and beats HTML <article> scraping: it gives clean pubDate,
-permalink, and the full announcement body in one shot, no per-post fetch
-needed.
-
-Discovery (fetch the feed, dedupe against previously-seen post IDs) is
-separate from extraction (ask a local LLM to turn the Greek announcement
-body into structured fields) is separate from ingest (POST the result to
-the Go dispatcher's /ingest/eoa, same shape as /ingest/eac, outage_type
-"water"). A post is only marked "seen" once its payload has been pushed
-successfully -- if the LLM or the ingest POST fails, it's retried next
-cycle instead of being silently dropped.
-
-Env:
-  INGEST_URL     e.g. http://localhost:8080/ingest/eoa
-  INGEST_TOKEN   shared secret, sent as X-Ingest-Token (must match Oracle)
-  OLLAMA_URL     default http://localhost:11434
-  OLLAMA_MODEL   default qwen2.5:7b-instruct
-  SEEN_STORE     path to the dedupe state file (default: eoa_pafos_seen.json,
-                 next to this script)
-
-  python eoa_pafos_scrape.py             # loop forever, push new items
-  python eoa_pafos_scrape.py --once      # single pass, then exit
-  python eoa_pafos_scrape.py --pages 5   # backfill: walk 5 feed pages
-"""
+# EOA Pafos (eoap.org.cy) water-interruption announcement scraper.
 
 import argparse, json, os, random, re, sys, time
 import xml.etree.ElementTree as ET

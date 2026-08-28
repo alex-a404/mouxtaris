@@ -13,4 +13,5 @@ type UserRepository interface {
 	Subscribe(ctx context.Context, telegramID int64, areaKey string) error
 	Unsubscribe(ctx context.Context, telegramID int64, areaKey string) error
 	ListSubscriptions(ctx context.Context, telegramID int64) ([]SubscriptionInfo, error)
+	DeleteUser(ctx context.Context, telegramID int64) error
 }

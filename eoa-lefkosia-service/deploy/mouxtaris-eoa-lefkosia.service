@@ -1,0 +1,26 @@
+[Unit]
+Description=Mouxtaris EOA Lefkosia water-outage scraper
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/opt/mouxtaris/eoa-lefkosia-service
+ExecStart=/home/opc/opt/mouxtaris/eoa-lefkosia-service/.venv/bin/python3 eoa_lefkosia_scrape.py
+EnvironmentFile=/etc/mouxtaris/scraper.env
+Restart=on-failure
+RestartSec=10s
+
+# The script's own loop already paces itself (--interval, default 300s);
+# Restart=on-failure is just a backstop for a crash, not the polling cadence.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mouxtaris-eoa-lefkosia
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,3 @@
-"""
-Env:
-  INGEST_URL     e.g. https://oracle.example.com:8080/ingest/eac
-  INGEST_TOKEN   shared secret, sent as X-Ingest-Token (must match Oracle)
-
-  python eac_push.py            # loop forever
-  python eac_push.py --once     # single push (for cron / testing)
-"""
-
 import argparse, hashlib, os, random, re, sys, time
 from dataclasses import dataclass, asdict
 from datetime import datetime
