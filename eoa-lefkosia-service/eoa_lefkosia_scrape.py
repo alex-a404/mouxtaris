@@ -104,11 +104,31 @@ def row_start_date(pairs: List[tuple]) -> Optional[date]:
     return None
 
 
+HIDDEN_CLASSES = {"elementor-hidden-desktop", "elementor-hidden-tablet", "elementor-hidden-mobile"}
+
+
+def is_retired(node) -> bool:
+    """NDLGO editors "retire" old entries by toggling Elementor's
+    responsive-visibility widget to hidden-on-desktop/tablet/mobile instead
+    of deleting the HTML, so a plain fetch still sees stale sections a
+    browser never renders."""
+    for _ in range(12):
+        node = node.parent
+        if node is None:
+            return False
+        if HIDDEN_CLASSES <= set(node.get("class") or []):
+            return True
+    return False
+
+
 def parse_page(html: str) -> List[dict]:
     """Every <h4> that matches a known section is followed by a <table>;
     each <tbody> <tr> becomes one row item, keyed by a content hash since
     the site gives no stable id."""
-    soup = BeautifulSoup(html, "html.parser")
+    # html5lib (not html.parser/lxml) because at least one section's table
+    # widget emits <tbody><td>...</td> rows with no <tr> wrapper -- only a
+    # full HTML5 tree-construction parser recovers the implied <tr>.
+    soup = BeautifulSoup(html, "html5lib")
     today = datetime.now(TZ).date()
     items = []
     for h in soup.find_all("h4"):
@@ -117,7 +137,7 @@ def parse_page(html: str) -> List[dict]:
         if cause is None:
             continue
         table = h.find_next("table")
-        if table is None:
+        if table is None or is_retired(table):
             continue
         headers = [clean(th.get_text(" ")) for th in table.select("thead th")]
         body = table.find("tbody")
