@@ -19,8 +19,12 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9,el;q=0.8",
 }
-TIMEOUT = httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
-RETRIES_PER_DISTRICT = 4
+# The EAC SharePoint backend routinely takes 30-45s to render this page
+# (observed range), well past a "the site is down" read timeout -- so give
+# it real headroom instead of retrying a slow-but-live server into a false
+# failure. Fewer retries than before since each one is now much pricier.
+TIMEOUT = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
+RETRIES_PER_DISTRICT = 3
 
 TZ = ZoneInfo("Asia/Nicosia")
 
