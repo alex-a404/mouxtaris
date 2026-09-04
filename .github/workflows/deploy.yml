@@ -1,0 +1,42 @@
+name: Deploy
+
+# Only push-to-main can trigger this. Never add pull_request/pull_request_target
+# here: this runs on a self-hosted runner living on the Oracle box, and the repo
+# is public -- a pull_request trigger would let anyone's fork run code on it.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, oracle]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync code to ~/opt/mouxtaris
+        run: |
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='__pycache__' \
+            --exclude='.idea' \
+            --exclude='.claude' \
+            --exclude='mouxtaris-bot/deploy' \
+            --exclude='mouxtaris-bot/bot' \
+            --exclude='mouxtaris-bot/dispatcher' \
+            --exclude='observability' \
+            --exclude='*_seen.json' \
+            --exclude='*_cache.json' \
+            ./ ~/opt/mouxtaris/
+
+      - name: Build and restart bot + dispatcher
+        run: |
+          cd ~/opt/mouxtaris/mouxtaris-bot
+          go build -o dispatcher ./cmd/dispatcher
+          go build -o bot ./cmd/bot
+          sudo restorecon -v dispatcher bot
+          sudo systemctl restart mouxtaris-dispatcher mouxtaris-bot
+
+      - name: Restart water-outage scrapers
+        run: |
+          sudo systemctl restart mouxtaris-eoa-pafos mouxtaris-eoa-lefkosia mouxtaris-eoa-lemesos
