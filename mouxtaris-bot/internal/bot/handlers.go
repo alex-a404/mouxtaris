@@ -56,7 +56,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		if len(results) > 0 {
 			name = results[0].NameEN
 		}
-		b.editToText(chatID, msgID, fmt.Sprintf("Subscribed to <b>%s</b>. You'll be notified of power cuts there.", name))
+		confirmation := fmt.Sprintf("Subscribed to <b>%s</b>. You'll be notified of power cuts there.", name)
+		if dk := b.resolver.DistrictKey(areaKey); dk == "larnaka" || dk == "ammochostos" {
+			confirmation += "\n\nNote: water outage alerts aren't available for Larnaca/Famagusta yet — only power cuts."
+		}
+		b.editToText(chatID, msgID, confirmation)
 
 	case strings.HasPrefix(cb.Data, "unsub:"):
 		areaKey := strings.TrimPrefix(cb.Data, "unsub:")

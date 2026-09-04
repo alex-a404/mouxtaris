@@ -525,6 +525,17 @@ func (r *Resolver) districtDisplayOf(p *place) string {
 	return ""
 }
 
+// DistrictKey returns the normalised district key (e.g. "lefkosia",
+// "larnaka") that areaKey falls under, or "" if the key is unknown or has
+// no resolvable district.
+func (r *Resolver) DistrictKey(areaKey string) string {
+	p, ok := r.byKey[areaKey]
+	if !ok {
+		return ""
+	}
+	return r.districtOf(p)
+}
+
 func (r *Resolver) districtOf(p *place) string {
 	seen := map[string]bool{}
 	for k := p.key; k != ""; {
