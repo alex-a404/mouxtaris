@@ -55,7 +55,38 @@ func New(areas []*Area) *Resolver {
 		r.byKey[a.Key] = p
 	}
 	r.buildHierarchy()
+	r.dropOutsideCoverage()
 	return r
+}
+
+// roCDistricts are the five Republic-of-Cyprus-administered districts that
+// EAC/EOA actually publish outage data for (matches foldDistrict's keys).
+var roCDistricts = map[string]bool{
+	"lefkosia": true, "lemesos": true, "larnaka": true,
+	"pafos": true, "ammochostos": true,
+}
+
+// dropOutsideCoverage removes every place that isn't itself a covered
+// district or resolvable (via the parent hierarchy built by buildHierarchy)
+func (r *Resolver) dropOutsideCoverage() {
+	keep := make(map[string]*place, len(r.places))
+	for _, p := range r.places {
+		if p.level == 5 && roCDistricts[foldDistrict(p.nameEL+" "+p.nameEN)] {
+			keep[p.key] = p
+			continue
+		}
+		if roCDistricts[r.districtOf(p)] {
+			keep[p.key] = p
+		}
+	}
+	places := r.places[:0]
+	for _, p := range r.places {
+		if keep[p.key] != nil {
+			places = append(places, p)
+		}
+	}
+	r.places = places
+	r.byKey = keep
 }
 
 // buildHierarchy assigns each place's parent = the smallest higher-level polygon
@@ -569,7 +600,46 @@ func (r *Resolver) districtOf(p *place) string {
 // Geometry
 // ---------------------------------------------------------------------------
 
+// centroid returns a representative interior point for a MultiPolygon's
+// rings, used for the point-in-polygon parent lookup in buildHierarchy.
+//
+// It prefers the average of every vertex, matching the historical behaviour
+// that already works for the overwhelming majority of shapes -- including
+// ones split into a small land ring plus a much larger disjoint sea/exclave
+// ring, where an area-weighted centroid would land in the wrong ring
+// entirely. Only when that average falls outside every one of the shape's
+// own rings -- which happens for a single ring with a highly detailed,
+// concave coastline, e.g. Ayia Napa, where dense coastline vertices drag the
+// average past the boundary -- does it fall back to the area-weighted
+// centroid of the largest ring, which is far more robust for that specific
+// failure mode.
 func centroid(rings [][][2]float64) (float64, float64, bool) {
+	vx, vy, vOK := vertexAverage(rings)
+	if vOK && pointInAnyRing(vx, vy, rings) {
+		return vx, vy, true
+	}
+
+	var bestArea, bestCx, bestCy float64
+	found := false
+	for _, ring := range rings {
+		area, cx, cy, ok := ringCentroid(ring)
+		if !ok {
+			continue
+		}
+		if area < 0 {
+			area = -area
+		}
+		if !found || area > bestArea {
+			bestArea, bestCx, bestCy, found = area, cx, cy, true
+		}
+	}
+	if found {
+		return bestCx, bestCy, true
+	}
+	return vx, vy, vOK
+}
+
+func vertexAverage(rings [][][2]float64) (float64, float64, bool) {
 	var sx, sy float64
 	n := 0
 	for _, r := range rings {
@@ -583,6 +653,47 @@ func centroid(rings [][][2]float64) (float64, float64, bool) {
 		return 0, 0, false
 	}
 	return sx / float64(n), sy / float64(n), true
+}
+
+func pointInAnyRing(x, y float64, rings [][][2]float64) bool {
+	for _, ring := range rings {
+		if pointInRing(x, y, ring) {
+			return true
+		}
+	}
+	return false
+}
+
+// ringCentroid computes a single ring's signed area and its area-weighted
+// centroid via the standard polygon-centroid (shoelace) formula. Falls back
+// to a vertex average for degenerate rings (fewer than 3 points, or zero
+// enclosed area) where the formula is undefined.
+func ringCentroid(ring [][2]float64) (area, cx, cy float64, ok bool) {
+	n := len(ring)
+	if n == 0 {
+		return 0, 0, 0, false
+	}
+	if n < 3 {
+		return 0, ring[0][0], ring[0][1], true
+	}
+	var a, sx, sy float64
+	for i := 0; i < n; i++ {
+		j := (i + 1) % n
+		cross := ring[i][0]*ring[j][1] - ring[j][0]*ring[i][1]
+		a += cross
+		sx += (ring[i][0] + ring[j][0]) * cross
+		sy += (ring[i][1] + ring[j][1]) * cross
+	}
+	a /= 2
+	if a == 0 {
+		var vx, vy float64
+		for _, p := range ring {
+			vx += p[0]
+			vy += p[1]
+		}
+		return 0, vx / float64(n), vy / float64(n), true
+	}
+	return a, sx / (6 * a), sy / (6 * a), true
 }
 
 func bbox(rings [][][2]float64) (float64, float64, float64, float64, bool) {

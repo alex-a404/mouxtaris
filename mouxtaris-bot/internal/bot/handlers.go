@@ -93,7 +93,8 @@ func (b *Bot) cmdStart(ctx context.Context, msg *tgbotapi.Message) {
 			"/list — view your subscriptions\n"+
 			"/unsubscribe — remove a subscription\n"+
 			"/delete_me — delete your account and all your data\n\n"+
-			"Privacy: the service stores only your Telegram ID and the areas you pick. No name, address, or location.",
+			"Privacy: the service stores only your Telegram ID and the areas you pick. No name, address, or location.\n"+
+			"Issues or suggestions? Contact mouxtarisbot@proton.me",
 	)
 }
 
