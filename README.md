@@ -23,7 +23,7 @@ them against a standardized area manifest and noifies users subscribed to releva
 through a local LLM to parse the location and interruption times.
 
 ### Deployment
-The bot is deployed in production on Oracle Cloud.
+The bot is deployed in production on Oracle Cloud. [![deploy.prod](https://github.com/alex-a404/mouxtaris/actions/workflows/deploy.yml/badge.svg)](https://github.com/alex-a404/mouxtaris/actions/workflows/deploy.yml)
 
 ### Sources and notice
 This project accesses only information that the EAC and EOAs publish publicly on their own websites, and relays it via Telegram to make it easier to access. It accesses no private, restricted, or personal data, and does not circumvent any access restriction. The authorities' own pages remain the authoritative source; users should verify there. This project claims no ownership of the underlying information, is provided as-is with no guarantee of accuracy or timeliness, and is not affiliated with, endorsed by, or operated by the EAC, any EOA, or any government body. If you represent a data provider and have questions or concerns, please open an issue or contact the maintainers at mouxtarisbot@proton.me.
