@@ -55,10 +55,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		if name == "" {
 			name = areaKey
 		}
-		confirmation := fmt.Sprintf("Subscribed to <b>%s</b>. You'll be notified of power cuts there.", name)
-		if dk := b.resolver.DistrictKey(areaKey); dk == "larnaka" || dk == "ammochostos" {
-			confirmation += "\n\nNote: water outage alerts aren't available for Larnaca/Famagusta yet — only power cuts."
+		kind := "power"
+		if dk := b.resolver.DistrictKey(areaKey); dk != "larnaka" && dk != "ammochostos" {
+			kind = "power/water"
 		}
+		confirmation := fmt.Sprintf("Subscribed to <b>%s</b>. You'll be notified of announced %s cuts in this area.", name, kind)
 		b.editToText(chatID, msgID, confirmation)
 
 	case strings.HasPrefix(cb.Data, "unsub:"):
