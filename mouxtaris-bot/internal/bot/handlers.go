@@ -51,10 +51,9 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 			return
 		}
 		// Find a display name for confirmation
-		results := b.resolver.Search(areaKey, 1)
-		name := areaKey
-		if len(results) > 0 {
-			name = results[0].NameEN
+		name := b.resolver.DisplayName(areaKey)
+		if name == "" {
+			name = areaKey
 		}
 		confirmation := fmt.Sprintf("Subscribed to <b>%s</b>. You'll be notified of power cuts there.", name)
 		if dk := b.resolver.DistrictKey(areaKey); dk == "larnaka" || dk == "ammochostos" {

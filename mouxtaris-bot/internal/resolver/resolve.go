@@ -525,6 +525,16 @@ func (r *Resolver) districtDisplayOf(p *place) string {
 	return ""
 }
 
+// DisplayName returns the display name for areaKey (its exact key, not a
+// fuzzy search), or "" if the key is unknown.
+func (r *Resolver) DisplayName(areaKey string) string {
+	p, ok := r.byKey[areaKey]
+	if !ok {
+		return ""
+	}
+	return displayName(p)
+}
+
 // DistrictKey returns the normalised district key (e.g. "lefkosia",
 // "larnaka") that areaKey falls under, or "" if the key is unknown or has
 // no resolvable district.
