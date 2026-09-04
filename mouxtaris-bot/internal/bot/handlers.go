@@ -89,7 +89,8 @@ func (b *Bot) cmdStart(ctx context.Context, msg *tgbotapi.Message) {
 			"/subscribe &lt;area&gt; — add an area (e.g. /subscribe Strovolos)\n"+
 			"/list — view your subscriptions\n"+
 			"/unsubscribe — remove a subscription\n"+
-			"/delete_me — delete your account and all your data",
+			"/delete_me — delete your account and all your data\n\n"+
+			"Privacy: the service stores only your Telegram ID and the areas you pick. No name, address, or location.",
 	)
 }
 
