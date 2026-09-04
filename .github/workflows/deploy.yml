@@ -1,8 +1,5 @@
-name: Deploy
+name: deploy.prod
 
-# Only push-to-main can trigger this. Never add pull_request/pull_request_target
-# here: this runs on a self-hosted runner living on the Oracle box, and the repo
-# is public -- a pull_request trigger would let anyone's fork run code on it.
 on:
   push:
     branches: [main]
