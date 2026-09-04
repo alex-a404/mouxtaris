@@ -88,7 +88,7 @@ func (b *Bot) cmdStart(ctx context.Context, msg *tgbotapi.Message) {
 	}
 	b.send(msg.Chat.ID,
 		"Welcome to <b>Mouxtaris</b>!\n\n"+
-			"Get notified when power cuts affect your area in Cyprus.\n\n"+
+			"Get notified when power/water cuts affect your area in Cyprus.\n\n"+
 			"/subscribe &lt;area&gt; — add an area (e.g. /subscribe Strovolos)\n"+
 			"/list — view your subscriptions\n"+
 			"/unsubscribe — remove a subscription\n"+
