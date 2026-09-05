@@ -41,7 +41,7 @@ func main() {
 	log.Printf("bot: loaded %d areas", len(areas))
 
 	areaRepo := store.NewAreaRepository(pool)
-	if err := areaRepo.UpsertAreas(ctx, toAreaSeeds(areas)); err != nil {
+	if err := areaRepo.UpsertAreas(ctx, store.ToAreaSeeds(areas)); err != nil {
 		log.Fatalf("seed areas: %v", err)
 	}
 
@@ -58,18 +58,4 @@ func mustEnv(k string) string {
 		log.Fatalf("missing env %s", k)
 	}
 	return v
-}
-
-func toAreaSeeds(areas []*resolve.Area) []store.AreaSeed {
-	seeds := make([]store.AreaSeed, len(areas))
-	for i, a := range areas {
-		seeds[i] = store.AreaSeed{
-			Key:       a.Key,
-			NameEL:    a.NameEL,
-			NameEN:    a.NameEN,
-			Level:     a.Level,
-			ParentKey: a.ParentKey,
-		}
-	}
-	return seeds
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	resolve "mouxtaris.com/dispatcher/internal/resolver"
 )
 
 // AreaSeed is a gazetteer entry to load into the areas table.
@@ -15,6 +16,30 @@ type AreaSeed struct {
 	Level     int
 	ParentKey string
 	Lat, Lon  *float64 // nil if the source feature had no geometry
+}
+
+// ToAreaSeeds converts loaded gazetteer areas into seeds for UpsertAreas.
+// Shared by cmd/dispatcher and cmd/bot -- both seed the same areas table at
+// startup, so a second, divergent copy of this conversion would silently
+// clobber whichever fields it forgets (lat/lon did exactly that: bot's
+// now-removed copy predated them, and restarting it after the dispatcher
+// wiped every area's coordinates back to NULL).
+func ToAreaSeeds(areas []*resolve.Area) []AreaSeed {
+	seeds := make([]AreaSeed, len(areas))
+	for i, a := range areas {
+		seeds[i] = AreaSeed{
+			Key:       a.Key,
+			NameEL:    a.NameEL,
+			NameEN:    a.NameEN,
+			Level:     a.Level,
+			ParentKey: a.ParentKey,
+		}
+		if a.HasGeo {
+			lat, lon := a.Lat, a.Lon
+			seeds[i].Lat, seeds[i].Lon = &lat, &lon
+		}
+	}
+	return seeds
 }
 
 type AreaRepositoryImpl struct {

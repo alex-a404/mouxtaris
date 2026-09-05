@@ -61,7 +61,7 @@ func main() {
 	}
 
 	areaRepo := store.NewAreaRepository(pool)
-	if err := areaRepo.UpsertAreas(ctx, toAreaSeeds(areas)); err != nil {
+	if err := areaRepo.UpsertAreas(ctx, store.ToAreaSeeds(areas)); err != nil {
 		log.Fatalf("seed areas: %v", err)
 	}
 
@@ -115,24 +115,6 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server: %v", err)
 	}
-}
-
-func toAreaSeeds(areas []*resolve.Area) []store.AreaSeed {
-	seeds := make([]store.AreaSeed, len(areas))
-	for i, a := range areas {
-		seeds[i] = store.AreaSeed{
-			Key:       a.Key,
-			NameEL:    a.NameEL,
-			NameEN:    a.NameEN,
-			Level:     a.Level,
-			ParentKey: a.ParentKey,
-		}
-		if a.HasGeo {
-			lat, lon := a.Lat, a.Lon
-			seeds[i].Lat, seeds[i].Lon = &lat, &lon
-		}
-	}
-	return seeds
 }
 
 func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Service, outageRepo *store.OutageRepositoryImpl, statePath string) gin.HandlerFunc {
