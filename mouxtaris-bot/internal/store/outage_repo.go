@@ -71,3 +71,22 @@ func (o *OutageRepositoryImpl) MarkResolved(ctx context.Context, keys []string, 
 	}
 	return nil
 }
+
+// MarkPastSchedule stamps resolved_at = to_at for any still-open outage whose
+// own stated restoration time has already passed. This is the second, and
+// for EOA/water sources the primary, way an outage gets resolved: those
+// scrapers pull an announcement archive rather than a live status board, so
+// an old post can keep reappearing in every snapshot indefinitely -- without
+// this, MarkResolved's feed-absence check alone would never fire for them.
+// Must run after UpsertOpen in the same request, since UpsertOpen
+// unconditionally resets resolved_at to NULL for every row still present in
+// the snapshot.
+func (o *OutageRepositoryImpl) MarkPastSchedule(ctx context.Context) error {
+	_, err := o.db.Exec(ctx,
+		`UPDATE outages SET resolved_at = to_at WHERE resolved_at IS NULL AND to_at IS NOT NULL AND to_at <= now()`,
+	)
+	if err != nil {
+		return fmt.Errorf("mark past schedule: %w", err)
+	}
+	return nil
+}

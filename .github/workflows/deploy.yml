@@ -33,6 +33,25 @@ jobs:
           sudo restorecon -v dispatcher bot
           sudo systemctl restart mouxtaris-dispatcher mouxtaris-bot
 
+      - name: Ensure EOA scraper venvs
+        run: |
+          for svc in eoa-pafos-service eoa-lefkosia-service eoa-lemesos-service; do
+            cd ~/opt/mouxtaris/$svc
+            [ -d .venv ] || python3.11 -m venv .venv
+            .venv/bin/pip install --quiet --upgrade pip
+            .venv/bin/pip install --quiet httpx beautifulsoup4 html5lib
+            # A freshly created .venv/bin lands with the wrong SELinux type
+            # (user_home_t) under this User=opc systemd services can't
+            # execute -- see mouxtaris-bot/deploy/install.md for the same
+            # issue on the dispatcher/bot binaries. -a fails (nonzero exit)
+            # if the fcontext rule already exists from a prior run, hence -m
+            # as the fallback rather than treating it as a real failure.
+            sudo semanage fcontext -a -t bin_t "$(pwd)/.venv/bin(/.*)?" 2>/dev/null \
+              || sudo semanage fcontext -m -t bin_t "$(pwd)/.venv/bin(/.*)?"
+            sudo restorecon -R .venv/bin
+            cd - > /dev/null
+          done
+
       - name: Restart water-outage scrapers
         run: |
           sudo systemctl restart mouxtaris-eoa-pafos mouxtaris-eoa-lefkosia mouxtaris-eoa-lemesos

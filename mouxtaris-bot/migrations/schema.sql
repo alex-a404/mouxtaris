@@ -10,9 +10,6 @@ CREATE TABLE IF NOT EXISTS areas (
 );
 CREATE INDEX IF NOT EXISTS areas_parent_idx ON areas(parent_key);
 
--- Added after the initial areas table existed on already-deployed databases;
--- CREATE TABLE IF NOT EXISTS above is a no-op there, so these columns need
--- their own idempotent add.
 ALTER TABLE areas ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
 ALTER TABLE areas ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION;
 
@@ -30,10 +27,6 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 
 CREATE INDEX IF NOT EXISTS subs_area_idx ON subscriptions(area_key);
 
--- Current/historical outage state, for the public map dashboard. Intentionally
--- carries nothing about users/subscriptions -- the Grafana role that reads this
--- for a public dashboard must only ever be granted SELECT on this table (and
--- areas, for lat/lon), never on users or subscriptions.
 CREATE TABLE IF NOT EXISTS outages (
     key          TEXT PRIMARY KEY,             -- outages.Service's natural key
     source       TEXT NOT NULL,                -- "eac" | "eoa"
@@ -51,3 +44,15 @@ CREATE TABLE IF NOT EXISTS outages (
 );
 CREATE INDEX IF NOT EXISTS outages_open_idx ON outages (resolved_at) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS outages_area_idx ON outages (area_key);
+
+DROP VIEW IF EXISTS outages_view; -- superseded: resolved_at itself now
+                                   -- accounts for a passed to_at (see
+                                   -- OutageRepositoryImpl.MarkPastSchedule)
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_public') THEN
+        GRANT SELECT ON outages, areas TO grafana_public;
+    END IF;
+END
+$$;

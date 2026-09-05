@@ -203,6 +203,9 @@ func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Serv
 				log.Printf("mark resolved: %v", err)
 			}
 		}
+		if err := outageRepo.MarkPastSchedule(c.Request.Context()); err != nil {
+			log.Printf("mark past schedule: %v", err)
+		}
 
 		metrics.IngestRequests.WithLabelValues(source, "ok").Inc()
 		metrics.IngestRows.WithLabelValues(source, "received").Add(float64(len(reports)))
