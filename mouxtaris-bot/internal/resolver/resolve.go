@@ -915,6 +915,8 @@ type Area struct {
 	NameEN    string
 	Level     int
 	ParentKey string
+	Lat, Lon  float64 // centroid; valid only if HasGeo
+	HasGeo    bool    // false for a manually added overrides.json entry with no polygon
 	rings     [][][2]float64
 }
 
@@ -934,8 +936,10 @@ func LoadGeoJSON(geojsonPath, overridesPath string) ([]*Area, error) {
 	}
 
 	overrides := map[string]struct {
-		NameEN    *string `json:"name_en"`
-		ParentKey *string `json:"parent_key"`
+		NameEN    *string  `json:"name_en"`
+		ParentKey *string  `json:"parent_key"`
+		Lat       *float64 `json:"lat"` // for a feature with no geometry to place on the map
+		Lon       *float64 `json:"lon"`
 	}{}
 	if overridesPath != "" {
 		if ob, err := os.ReadFile(overridesPath); err == nil {
@@ -954,12 +958,19 @@ func LoadGeoJSON(geojsonPath, overridesPath string) ([]*Area, error) {
 			Level:  levelOf(p),
 			rings:  parseRings(f.Geometry),
 		}
+		// cx/cy are in GeoJSON coordinate order, i.e. [lon, lat].
+		if cx, cy, ok := centroid(a.rings); ok {
+			a.Lon, a.Lat, a.HasGeo = cx, cy, true
+		}
 		if ov, ok := overrides[key]; ok {
 			if ov.NameEN != nil {
 				a.NameEN = *ov.NameEN
 			}
 			if ov.ParentKey != nil {
 				a.ParentKey = *ov.ParentKey
+			}
+			if ov.Lat != nil && ov.Lon != nil {
+				a.Lat, a.Lon, a.HasGeo = *ov.Lat, *ov.Lon, true
 			}
 		}
 		if a.NameEL == "" && a.NameEN == "" {

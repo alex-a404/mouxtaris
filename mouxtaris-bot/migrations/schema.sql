@@ -3,9 +3,18 @@ CREATE TABLE IF NOT EXISTS areas (
     name_el     TEXT NOT NULL,               -- Greek, used for matching source text
     name_en     TEXT NOT NULL,               -- English, used for display
     level       SMALLINT NOT NULL,           -- 5 district, 6 municipality, 8 town/village
-    parent_key  TEXT REFERENCES areas(key)   -- one hop up; NULL for a top-level node
+    parent_key  TEXT REFERENCES areas(key),  -- one hop up; NULL for a top-level node
+    lat         DOUBLE PRECISION,            -- centroid, for map display; NULL if the
+    lon         DOUBLE PRECISION             -- source feature had no geometry (e.g. a
+                                              -- manually added overrides.json entry)
 );
 CREATE INDEX IF NOT EXISTS areas_parent_idx ON areas(parent_key);
+
+-- Added after the initial areas table existed on already-deployed databases;
+-- CREATE TABLE IF NOT EXISTS above is a no-op there, so these columns need
+-- their own idempotent add.
+ALTER TABLE areas ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
+ALTER TABLE areas ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION;
 
 CREATE TABLE IF NOT EXISTS users (
     telegram_id BIGINT PRIMARY KEY,
@@ -20,3 +29,25 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 );
 
 CREATE INDEX IF NOT EXISTS subs_area_idx ON subscriptions(area_key);
+
+-- Current/historical outage state, for the public map dashboard. Intentionally
+-- carries nothing about users/subscriptions -- the Grafana role that reads this
+-- for a public dashboard must only ever be granted SELECT on this table (and
+-- areas, for lat/lon), never on users or subscriptions.
+CREATE TABLE IF NOT EXISTS outages (
+    key          TEXT PRIMARY KEY,             -- outages.Service's natural key
+    source       TEXT NOT NULL,                -- "eac" | "eoa"
+    outage_type  TEXT NOT NULL,                -- "power" | "water"
+    outage_cause TEXT NOT NULL,                -- "fault" | "scheduled"
+    area_key     TEXT REFERENCES areas(key),   -- NULL if never resolved to a known area
+    area_name    TEXT NOT NULL,                -- display name as of last_seen
+    district     TEXT NOT NULL,
+    raw_location TEXT NOT NULL,
+    from_at      TIMESTAMPTZ,                  -- NULL if unparseable
+    to_at        TIMESTAMPTZ,
+    first_seen   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at  TIMESTAMPTZ                   -- NULL while still open
+);
+CREATE INDEX IF NOT EXISTS outages_open_idx ON outages (resolved_at) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS outages_area_idx ON outages (area_key);

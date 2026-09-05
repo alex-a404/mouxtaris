@@ -14,6 +14,7 @@ type AreaSeed struct {
 	NameEN    string
 	Level     int
 	ParentKey string
+	Lat, Lon  *float64 // nil if the source feature had no geometry
 }
 
 type AreaRepositoryImpl struct {
@@ -33,13 +34,15 @@ func (a *AreaRepositoryImpl) UpsertAreas(ctx context.Context, areas []AreaSeed) 
 
 	for _, ar := range areas {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO areas (key, name_el, name_en, level, parent_key)
-			 VALUES ($1, $2, $3, $4, NULL)
+			`INSERT INTO areas (key, name_el, name_en, level, parent_key, lat, lon)
+			 VALUES ($1, $2, $3, $4, NULL, $5, $6)
 			 ON CONFLICT (key) DO UPDATE SET
 			   name_el = EXCLUDED.name_el,
 			   name_en = EXCLUDED.name_en,
-			   level   = EXCLUDED.level`,
-			ar.Key, ar.NameEL, ar.NameEN, ar.Level,
+			   level   = EXCLUDED.level,
+			   lat     = EXCLUDED.lat,
+			   lon     = EXCLUDED.lon`,
+			ar.Key, ar.NameEL, ar.NameEN, ar.Level, ar.Lat, ar.Lon,
 		); err != nil {
 			return fmt.Errorf("upsert area %q: %w", ar.Key, err)
 		}

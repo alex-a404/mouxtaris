@@ -61,5 +61,10 @@
   },
   "Σύμπλεγμα Κοινοτήτων Αμαθός": {
     "name_en": "Amathos (Mountain) Community Cluster"
+  },
+  "Βορόκλήνη": {
+    "parent_key": "Q59153",
+    "lat": 34.98278,
+    "lon": 33.65444
   }
 }

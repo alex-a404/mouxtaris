@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -66,16 +67,36 @@ func main() {
 
 	resolver := resolve.New(areas)
 	dispatcher := dispatch.NewService(bot, resolver, userRepo)
+	outageRepo := store.NewOutageRepository(pool)
 
 	// Separate outages.Service per source: Reconcile() marks anything missing
 	// from a pushed snapshot as resolved, so a shared Service would let an
 	// EOA (water) push wrongly resolve open EAC (power) outages, and vice versa.
+	//
+	// Each is persisted to its own file under STATE_DIRECTORY so a dispatcher
+	// restart doesn't forget every outage it already announced and re-notify
+	// subscribers about all of them. STATE_DIRECTORY must live outside the
+	// rsync'd source tree (see deploy/install.md) -- systemd's
+	// StateDirectory= sets it to a path that survives redeploys.
+	stateDir := envOr("STATE_DIRECTORY", ".")
+	eacStatePath := filepath.Join(stateDir, "eac_known.json")
+	eoaStatePath := filepath.Join(stateDir, "eoa_known.json")
+	if err := outages.EnsureDir(eacStatePath); err != nil {
+		log.Fatalf("state dir: %v", err)
+	}
+
 	eacSvc := outages.NewService()
+	if err := eacSvc.LoadFile(eacStatePath); err != nil {
+		log.Printf("load eac state: %v", err)
+	}
 	eoaSvc := outages.NewService()
+	if err := eoaSvc.LoadFile(eoaStatePath); err != nil {
+		log.Printf("load eoa state: %v", err)
+	}
 
 	router := gin.Default()
-	router.POST("/ingest/eac", ingestHandler(ingestToken, eacSvc, dispatcher))
-	router.POST("/ingest/eoa", ingestHandler(ingestToken, eoaSvc, dispatcher))
+	router.POST("/ingest/eac", ingestHandler(ingestToken, eacSvc, dispatcher, outageRepo, eacStatePath))
+	router.POST("/ingest/eoa", ingestHandler(ingestToken, eoaSvc, dispatcher, outageRepo, eoaStatePath))
 	router.GET("/healthz", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
 
 	// Gated by the same ingest token: port 8080 is already reachable from the
@@ -106,11 +127,15 @@ func toAreaSeeds(areas []*resolve.Area) []store.AreaSeed {
 			Level:     a.Level,
 			ParentKey: a.ParentKey,
 		}
+		if a.HasGeo {
+			lat, lon := a.Lat, a.Lon
+			seeds[i].Lat, seeds[i].Lon = &lat, &lon
+		}
 	}
 	return seeds
 }
 
-func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Service) gin.HandlerFunc {
+func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Service, outageRepo *store.OutageRepositoryImpl, statePath string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		source := c.GetHeader("X-Scraper-Source")
 		if source == "" {
@@ -135,10 +160,11 @@ func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Serv
 		present := make(map[string]struct{}, len(reports))
 		var created, updated int
 		for _, r := range reports {
-			present[svc.KeyOf(r)] = struct{}{}
+			key := svc.KeyOf(r)
+			present[key] = struct{}{}
 			change := svc.ProcessReport(r)
 
-			area, resolved := dispatcher.Resolve(r)
+			areaKey, area, resolved := dispatcher.Resolve(r)
 			pushLog.Info("push",
 				"source", source,
 				"change", changeLabel(change.Kind),
@@ -151,6 +177,10 @@ func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Serv
 				"area", area,
 			)
 
+			if err := outageRepo.UpsertOpen(c.Request.Context(), toOutageRow(key, source, r, areaKey, area, resolved)); err != nil {
+				log.Printf("upsert outage: %v", err)
+			}
+
 			switch change.Kind {
 			case outages.Created:
 				created++
@@ -161,6 +191,18 @@ func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Serv
 			}
 		}
 		gone := svc.Reconcile(present)
+		if err := svc.SaveFile(statePath); err != nil {
+			log.Printf("save state %s: %v", statePath, err)
+		}
+		if len(gone) > 0 {
+			goneKeys := make([]string, len(gone))
+			for i, r := range gone {
+				goneKeys[i] = svc.KeyOf(r)
+			}
+			if err := outageRepo.MarkResolved(c.Request.Context(), goneKeys, time.Now()); err != nil {
+				log.Printf("mark resolved: %v", err)
+			}
+		}
 
 		metrics.IngestRequests.WithLabelValues(source, "ok").Inc()
 		metrics.IngestRows.WithLabelValues(source, "received").Add(float64(len(reports)))
@@ -176,6 +218,28 @@ func ingestHandler(token string, svc *outages.Service, dispatcher *dispatch.Serv
 			"resolved": len(gone),
 		})
 	}
+}
+
+func toOutageRow(key, source string, r outages.OutageReport, areaKey, areaName string, resolved bool) store.OutageRow {
+	row := store.OutageRow{
+		Key:         key,
+		Source:      source,
+		OutageType:  string(r.OutageType),
+		OutageCause: string(r.OutageCause),
+		AreaName:    areaName,
+		District:    r.District,
+		RawLocation: r.RawLocation(),
+	}
+	if resolved {
+		row.AreaKey = &areaKey
+	}
+	if t, ok := outages.ParseTime(r.FromDateTime); ok {
+		row.FromAt = &t
+	}
+	if t, ok := outages.ParseTime(r.ToDateTime); ok {
+		row.ToAt = &t
+	}
+	return row
 }
 
 func changeLabel(k outages.ChangeKind) string {

@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
-
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -35,11 +33,11 @@ func NewService(bot Sender, resolver Resolver, userRepo store.UserRepository) *S
 }
 
 // Resolve exposes area resolution without sending anything, so callers can
-// log/observe what a raw outage report resolves to independent of whether
-// it's new enough to notify subscribers about.
-func (s *Service) Resolve(outage outages.OutageReport) (areaName string, ok bool) {
-	_, displayName, _, ok := s.resolver.Resolve(outage)
-	return displayName, ok
+// log/observe -- or persist -- what a raw outage report resolves to,
+// independent of whether it's new enough to notify subscribers about.
+func (s *Service) Resolve(outage outages.OutageReport) (areaKey, areaName string, ok bool) {
+	key, displayName, _, ok := s.resolver.Resolve(outage)
+	return key, displayName, ok
 }
 
 // Notify determines who to notify when outage recieved
@@ -99,14 +97,11 @@ func renderOutage(o outages.OutageReport, areaName string, matchedSubdistrict bo
 }
 
 func fmtTime(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
+	if strings.TrimSpace(s) == "" {
 		return "—"
 	}
-	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.Format("2 Jan 15:04")
-		}
+	if t, ok := outages.ParseTime(s); ok {
+		return t.Format("2 Jan 15:04")
 	}
 	return s // unparseable: show as-is rather than blank
 }

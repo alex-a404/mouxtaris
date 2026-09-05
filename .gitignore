@@ -92,6 +92,12 @@ Desktop.ini
 # Local / temporary files
 # =========================
 
+# outages.Service persisted state (see internal/outages/persist.go) --
+# written next to the dispatcher binary when STATE_DIRECTORY isn't set
+# (e.g. local `go run`); in production it's set to a path outside the repo.
+mouxtaris-bot/eac_known.json
+mouxtaris-bot/eoa_known.json
+
 *.tmp
 *.temp
 *.swp
