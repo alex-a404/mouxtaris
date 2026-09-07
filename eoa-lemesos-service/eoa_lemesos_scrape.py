@@ -10,7 +10,7 @@
 # like WP's ?p=N), and the listing only shows a truncated excerpt -- the
 # full body has to be fetched from the detail page.
 
-import argparse, json, os, random, re, sys, time
+import argparse, json, os, random, re, sys, time, unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -50,6 +50,29 @@ SEEN_STORE = Path(os.environ.get("SEEN_STORE", Path(__file__).with_name("eoa_lem
 
 def clean(s: str) -> str:
     return WS.sub(" ", s or "").strip()
+
+
+def _fold(s: str) -> str:
+    s = unicodedata.normalize("NFD", s.lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.replace("ς", "σ")
+
+
+def grounded(candidate: str, source: str) -> bool:
+    """True if every word of `candidate` has a stem that actually occurs in
+    `source`. Guards against the LLM inventing a place name (e.g. echoing a
+    few-shot example from the prompt) instead of reading the announcement --
+    uses a stem, not an exact match, so a Greek case ending (nominative vs.
+    genitive) doesn't cause a false negative."""
+    src = _fold(source)
+    for word in candidate.split():
+        w = _fold(word)
+        if len(w) < 2:
+            continue
+        stem = w[:5] if len(w) > 5 else w
+        if stem not in src:
+            return False
+    return True
 
 
 def fetch(client: httpx.Client, url: str, referer: str | None = None) -> str | None:
@@ -159,9 +182,14 @@ Output ONLY a JSON object of the form:
 Field rules:
 - town_village: the municipality/village/community named in the text (e.g. "Ζακάκι",
   "Άγιος Αθανάσιος"), in Greek exactly as written there. Required -- if you cannot
-  find one, omit that outage from the array entirely.
-- area_subdistrict: a specific street name if one is given (e.g. "οδό Σαρωνικού"),
-  else "".
+  find one, omit that outage from the array entirely. Never invent or guess a place
+  name from general knowledge of the district, and never reuse a name from these
+  instructions' examples -- only output a name that is actually written in the
+  Title or Body given to you.
+- area_subdistrict: street name(s) if given (e.g. "Σαρωνικού"). Announcements often
+  list several as a bullet/line-per-street block (e.g. "επηρεάζονται οι παρακάτω
+  οδοί: ..." followed by one street per line) -- when that happens, include EVERY
+  one, joined with ", ", not just the first. Else "".
 - part_of_area: any other descriptive qualifier that isn't a street name (e.g. a
   named neighbourhood or a "bounded by streets X, Y, Z" description), else "".
 - outage_cause: "fault" if the text mentions a fault/breakdown (βλάβη), otherwise
@@ -199,6 +227,21 @@ Output: {"outages": [{"town_village": "Άγιος Αθανάσιος", "area_sub
 "Μεσολογγίου", "part_of_area": "Δήμος Αμαθούντας", "outage_cause": "scheduled", \
 "outage_from_date": "2026-07-15", "outage_from_time": "", "outage_to_date": \
 "2026-07-15", "outage_to_time": ""}]}
+
+Example 3:
+Announcement publish date: 2026-09-07
+Title: Ανακοίνωση - Διακοπή νερού λόγω βλάβης σε μέρος του Δημοτικού Διαμερίσματος \
+Κάτω Πολεμιδιών
+Body: Ενημερώνεται το κοινό ότι, λόγω βλάβης στο υδρευτικό δίκτυο, έχει διακοπεί η \
+υδροδότηση σε μέρος του Δημοτικού Διαμερίσματος Κάτω Πολεμιδιών (Δήμος Πολεμιδιών). \
+Από τη βλάβη επηρεάζονται οι παρακάτω οδοί: Δρόμος αριθμός 97 Δερκυλίδας Δρόμος \
+αριθμός 95 Παναγή Κουταλιανού. Τα συνεργεία μας βρίσκονται ήδη εκεί για την \
+αποκατάσταση της βλάβης. Υπολογίζεται αποκατάσταση της βλάβης και της παροχής νερού \
+σήμερα, 7 Σεπτεμβρίου, γύρω στις 3:00 μ.μ.
+Output: {"outages": [{"town_village": "Κάτω Πολεμίδια", "area_subdistrict": \
+"Δρόμος αριθμός 97, Δερκυλίδας, Δρόμος αριθμός 95, Παναγή Κουταλιανού", \
+"part_of_area": "", "outage_cause": "fault", "outage_from_date": "2026-09-07", \
+"outage_from_time": "", "outage_to_date": "2026-09-07", "outage_to_time": "15:00"}]}
 """
 
 
@@ -246,7 +289,19 @@ def call_llm(client: httpx.Client, item: dict) -> Optional[list]:
     if not isinstance(outages, list) or not outages:
         print(f"  llm found no outages for {item['permalink']}", file=sys.stderr)
         return None
-    return outages
+
+    source_text = f"{item['title']} {item['body']}"
+    kept = []
+    for o in outages:
+        if isinstance(o, dict) and not grounded(o.get("town_village", ""), source_text):
+            print(f"  llm hallucinated ungrounded town_village {o.get('town_village')!r} "
+                  f"for {item['permalink']}, dropping", file=sys.stderr)
+            continue
+        kept.append(o)
+    if not kept:
+        print(f"  llm found no grounded outages for {item['permalink']}", file=sys.stderr)
+        return None
+    return kept
 
 
 def localize(date_s: str, time_s: str) -> str:

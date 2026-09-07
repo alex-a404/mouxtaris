@@ -1,6 +1,6 @@
 # EOA Pafos (eoap.org.cy) water-interruption announcement scraper.
 
-import argparse, json, os, random, re, sys, time
+import argparse, json, os, random, re, sys, time, unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -49,6 +49,29 @@ SEEN_STORE = Path(os.environ.get("SEEN_STORE", Path(__file__).with_name("eoa_paf
 
 def clean(s: str) -> str:
     return WS.sub(" ", s or "").strip()
+
+
+def _fold(s: str) -> str:
+    s = unicodedata.normalize("NFD", s.lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.replace("ς", "σ")
+
+
+def grounded(candidate: str, source: str) -> bool:
+    """True if every word of `candidate` has a stem that actually occurs in
+    `source`. Guards against the LLM inventing a place name (e.g. echoing a
+    few-shot example from the prompt) instead of reading the announcement --
+    uses a stem, not an exact match, so a Greek case ending (nominative vs.
+    genitive) doesn't cause a false negative."""
+    src = _fold(source)
+    for word in candidate.split():
+        w = _fold(word)
+        if len(w) < 2:
+            continue
+        stem = w[:5] if len(w) > 5 else w
+        if stem not in src:
+            return False
+    return True
 
 
 BOILERPLATE_RE = re.compile(r"εμφανίστηκε πρώτα στο", re.I)
@@ -161,9 +184,12 @@ Output ONLY a JSON object of the form:
 Field rules:
 - town_village: the municipality/village named in the text (e.g. "Πέγεια", "Γεροσκήπου"),
   in Greek exactly as written there. Required -- if you cannot find one, omit that
-  outage from the array entirely.
-- area_subdistrict: a specific street/neighbourhood name if one is given (e.g. "οδό
-  Αγίας Ειρήνης"), else "".
+  outage from the array entirely. Never invent or guess a place name from general
+  knowledge of the district, and never reuse a name from these instructions'
+  examples -- only output a name that is actually written in the Title or Body.
+- area_subdistrict: street/neighbourhood name(s) if given (e.g. "Αγίας Ειρήνης"). If
+  several streets are listed, include EVERY one, joined with ", ", not just the
+  first. Else "".
 - part_of_area: any other descriptive qualifier that isn't a street name (e.g. "περιοχή
   πίσω από το παλιό ΚΕΝ"), else "".
 - outage_cause: "fault" if the text mentions a fault/breakdown (βλάβη), otherwise
@@ -248,7 +274,19 @@ def call_llm(client: httpx.Client, item: dict) -> Optional[list]:
     if not isinstance(outages, list) or not outages:
         print(f"  llm found no outages for post {item['post_id']}", file=sys.stderr)
         return None
-    return outages
+
+    source_text = f"{item['title']} {item['body']}"
+    kept = []
+    for o in outages:
+        if isinstance(o, dict) and not grounded(o.get("town_village", ""), source_text):
+            print(f"  llm hallucinated ungrounded town_village {o.get('town_village')!r} "
+                  f"for post {item['post_id']}, dropping", file=sys.stderr)
+            continue
+        kept.append(o)
+    if not kept:
+        print(f"  llm found no grounded outages for post {item['post_id']}", file=sys.stderr)
+        return None
+    return kept
 
 
 def localize(date_s: str, time_s: str) -> str:

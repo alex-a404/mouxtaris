@@ -1,6 +1,6 @@
 # EOA Lefkosia / NDLGO (ndlgo.org.cy) water-interruption scraper.
 
-import argparse, json, os, random, re, sys, time
+import argparse, json, os, random, re, sys, time, unicodedata
 from datetime import date, datetime
 from hashlib import sha1
 from pathlib import Path
@@ -46,6 +46,29 @@ CACHE_STORE = Path(os.environ.get("CACHE_STORE", Path(__file__).with_name("eoa_l
 
 def clean(s: str) -> str:
     return WS.sub(" ", s or "").strip()
+
+
+def _fold(s: str) -> str:
+    s = unicodedata.normalize("NFD", s.lower())
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return s.replace("ς", "σ")
+
+
+def grounded(candidate: str, source: str) -> bool:
+    """True if every word of `candidate` has a stem that actually occurs in
+    `source`. Guards against the LLM inventing a place name (e.g. echoing a
+    few-shot example from the prompt) instead of reading the row -- uses a
+    stem, not an exact match, so a Greek case ending doesn't cause a false
+    negative."""
+    src = _fold(source)
+    for word in candidate.split():
+        w = _fold(word)
+        if len(w) < 2:
+            continue
+        stem = w[:5] if len(w) > 5 else w
+        if stem not in src:
+            return False
+    return True
 
 
 def now_str() -> str:
@@ -188,7 +211,9 @@ Output ONLY a JSON object of the form:
 Field rules:
 - town_village: the municipality/community name (e.g. "Λατσιά", "Μάμμαρι"), in Greek
   exactly as written, WITHOUT any parenthetical reference code (e.g. drop "(περ.21)").
-  Required -- if you cannot find one, omit that outage from the array entirely.
+  Required -- if you cannot find one, omit that outage from the array entirely. Never
+  invent or guess a place name from general knowledge, and never reuse a name from
+  these instructions' examples -- only output a name actually written in the Row.
 - area_subdistrict: specific street name(s) if given (e.g. "Ηπείρου, Σταύρου Βενιζέλου").
   If several streets are listed, join them with ", ". Else "".
 - part_of_area: a broader named zone that isn't a street (e.g. "Νέος Οικισμός και
@@ -271,7 +296,18 @@ def call_llm(client: httpx.Client, row_text: str) -> Optional[list]:
     if not isinstance(outages, list) or not outages:
         print("  llm found no outages for row", file=sys.stderr)
         return None
-    return outages
+
+    kept = []
+    for o in outages:
+        if isinstance(o, dict) and not grounded(o.get("town_village", ""), row_text):
+            print(f"  llm hallucinated ungrounded town_village {o.get('town_village')!r}, "
+                  f"dropping", file=sys.stderr)
+            continue
+        kept.append(o)
+    if not kept:
+        print("  llm found no grounded outages for row", file=sys.stderr)
+        return None
+    return kept
 
 
 def localize(date_s: str, time_s: str) -> str:

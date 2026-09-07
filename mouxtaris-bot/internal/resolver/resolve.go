@@ -784,6 +784,12 @@ var qualifiers = map[string]string{
 	// "Pafos"-qualified query (e.g. "Pafos Kato") ties with every unrelated
 	// "Kato *" village instead of preferring the actual Paphos-named place.
 	"pafos": "paphos",
+	// EAC's own English feed is inconsistent about this town, spelling it
+	// "Pegeia" (literal γ->g transliteration) on some announcements and
+	// "Peyia" (OSM's name:en, and the spelling everyone actually uses) on
+	// others. tokSim("pegeia","peyia") is ~0.667, short of tokenHit (0.80),
+	// so every "Pegeia"-spelled outage silently failed to resolve at all.
+	"pegeia": "peyia",
 }
 
 var deaccent = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
