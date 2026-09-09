@@ -54,19 +54,35 @@ def _fold(s: str) -> str:
     return s.replace("ς", "σ")
 
 
+_VOWELS = set("αεηιουω")
+
+
+def _stem(w: str) -> str:
+    """Crude Greek stem of an already-folded word: drop a final σ/ν, then
+    trailing vowels, keeping at least 3 letters. This maps the case/number
+    forms of a place name onto one prefix -- Άγιος/Αγίου/Άγιο -> "αγι",
+    Πολεμίδια/Πολεμιδιών -> "πολεμιδι", Πάφος/Πάφου -> "παφ" -- which a
+    fixed-length prefix cannot do for short names (the 5-letter "αγιοσ"
+    was its own "stem" and never matched the genitive "αγιου")."""
+    if len(w) > 3 and w[-1] in "σν":
+        w = w[:-1]
+    while len(w) > 3 and w[-1] in _VOWELS:
+        w = w[:-1]
+    return w
+
+
 def grounded(candidate: str, source: str) -> bool:
     """True if every word of `candidate` has a stem that actually occurs in
     `source`. Guards against the LLM inventing a place name (e.g. echoing a
-    few-shot example from the prompt) instead of reading the row -- uses a
-    stem, not an exact match, so a Greek case ending doesn't cause a false
-    negative."""
+    few-shot example from the prompt) instead of reading the announcement --
+    uses a stem, not an exact match, so a Greek case ending (nominative vs.
+    genitive) doesn't cause a false negative."""
     src = _fold(source)
-    for word in candidate.split():
+    for word in re.findall(r"[^\W\d_]+", candidate):
         w = _fold(word)
         if len(w) < 2:
             continue
-        stem = w[:5] if len(w) > 5 else w
-        if stem not in src:
+        if _stem(w) not in src:
             return False
     return True
 
