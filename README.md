@@ -20,7 +20,7 @@ The project codebase consists of:
 
 The scraper services POST announcements to the `ingest/eoa` and `ingest/eac` endpoints of the dispatcher, which resolves 
 them against a standardized area manifest and noifies users subscribed to relevant areas. Two EOA scraper services pass announcements
-through a local LLM to parse the location and interruption times.
+through Claude (Anthropic API) to parse the location and interruption times.
 
 ### Deployment
 The bot is deployed in production on Oracle Cloud. [![deploy.prod](https://github.com/alex-a404/mouxtaris/actions/workflows/deploy.yml/badge.svg)](https://github.com/alex-a404/mouxtaris/actions/workflows/deploy.yml)
