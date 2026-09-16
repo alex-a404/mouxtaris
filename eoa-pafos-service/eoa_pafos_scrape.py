@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
+import anthropic
 import httpx
 from bs4 import BeautifulSoup
 
@@ -27,17 +28,11 @@ BROWSER_HEADERS = {
 TIMEOUT = httpx.Timeout(connect=10.0, read=25.0, write=10.0, pool=10.0)
 RETRIES = 4
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
-# CPU inference is slow, and a cold model load (weights into RAM) alone can
-# take minutes -- keep the read timeout generous and configurable.
-LLM_TIMEOUT = httpx.Timeout(
-    connect=5.0, read=float(os.environ.get("OLLAMA_TIMEOUT", "600")), write=10.0, pool=10.0
-)
-# Keep the model resident between calls: Ollama's default keep_alive (5m) is
-# shorter than this script's default --interval (15m), so without this every
-# poll cycle would pay the cold-load cost again, not just the first one.
-OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5")
+LLM_MAX_TOKENS = 16000
+LLM_TIMEOUT_S = float(os.environ.get("LLM_TIMEOUT", "120"))
+LLM_MAX_ATTEMPTS = 3  # per item per process; then give up on it and move on
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 TZ = ZoneInfo("Asia/Nicosia")
 NS = {"content": "http://purl.org/rss/1.0/modules/content/"}
@@ -199,15 +194,17 @@ Output ONLY a JSON object of the form:
 
 Field rules:
 - town_village: the municipality/village named in the text (e.g. "Πέγεια", "Γεροσκήπου"),
-  in Greek exactly as written there. Required -- if you cannot find one, omit that
-  outage from the array entirely. Never invent or guess a place name from general
-  knowledge of the district, and never reuse a name from these instructions'
+  in Greek, in its nominative (dictionary) form. Required -- if you cannot find one,
+  omit that outage from the array entirely. Never invent or guess a place name from
+  general knowledge of the district, and never reuse a name from these instructions'
   examples -- only output a name that is actually written in the Title or Body.
-- area_subdistrict: street/neighbourhood name(s) if given (e.g. "Αγίας Ειρήνης"). If
-  several streets are listed, include EVERY one, joined with ", ", not just the
-  first. Else "".
-- part_of_area: any other descriptive qualifier that isn't a street name (e.g. "περιοχή
-  πίσω από το παλιό ΚΕΝ"), else "".
+- area_subdistrict: the NAMED sub-area of that town if the text gives one -- a
+  neighbourhood/quarter ("περιοχή Χ", "ενορία Χ"), a municipal district ("Δημοτικό
+  Διαμέρισμα Χ" -> "Χ"), or a village inside a merged municipality -- as a proper
+  place name in nominative form. NOT a street. Only a name written in the text. Else "".
+- part_of_area: the street name(s) affected, and any other descriptive qualifier that
+  is not a place name (e.g. "περιοχή πίσω από το παλιό ΚΕΝ"). If several streets are
+  listed, include EVERY one, joined with ", ", not just the first. Else "".
 - outage_cause: "fault" if the text mentions a fault/breakdown (βλάβη), otherwise
   "scheduled".
 - Dates: the text often gives relative days ("σήμερα" = today, "αύριο" = tomorrow,
@@ -215,12 +212,17 @@ Field rules:
   publish date -- use it as "today" to resolve these into absolute YYYY-MM-DD dates.
   If no restoration date is given at all (outage open-ended / "until further notice"),
   leave outage_to_date and outage_to_time as "".
-- Times: only fill *_time if the text states an actual clock time or the
-  announcement's own "Ημερομηνία ανακοίνωσης" timestamp is the best available
-  anchor for outage_from_time. Vague words like "πρωί" (morning) are not clock
-  times -- leave the time field "" for those.
-- Most announcements describe exactly one location; only include multiple objects
-  in "outages" if the text clearly names multiple distinct places.
+- Times: fill *_time with the clock time when the text states one, or use the
+  announcement's own "Ημερομηνία ανακοίνωσης" timestamp as the anchor for
+  outage_from_time. When restoration is given only as a part of the day, use an
+  approximate clock time: πρωί "09:00", μεσημέρι "12:00", νωρίς το απόγευμα "15:00",
+  απόγευμα "17:00", βράδυ "20:00". Otherwise leave the time field "".
+- One object per distinct place. An announcement can affect several
+  municipalities/communities, or several named neighbourhoods of one municipality.
+  Output one object for EVERY distinct (town_village, area_subdistrict) pair the
+  text names, each carrying only the streets that belong to it and the same
+  dates/times. Never merge two places into one object and never drop one. The
+  "outages" value is always an array, even for a single place.
 
 Example 1:
 Announcement publish date: 2026-07-31
@@ -228,8 +230,8 @@ Title: Διακοπή Yδροδότησης – Δήμος Ακάμα
 Body: Ενημερώνουμε το κοινό ότι σήμερα, Παρασκευή 31/07/2026, υπάρχει διακοπή \
 υδροδότησης στην Πέγεια, στην οδό Αγίας Ειρήνης. Η υδροδότηση αναμένεται να \
 επανέλθει αύριο, Σάββατο 01/08/2026.
-Output: {"outages": [{"town_village": "Πέγεια", "area_subdistrict": "Αγίας Ειρήνης", \
-"part_of_area": "", "outage_cause": "scheduled", "outage_from_date": "2026-07-31", \
+Output: {"outages": [{"town_village": "Πέγεια", "area_subdistrict": "", \
+"part_of_area": "Αγίας Ειρήνης", "outage_cause": "scheduled", "outage_from_date": "2026-07-31", \
 "outage_from_time": "", "outage_to_date": "2026-08-01", "outage_to_time": ""}]}
 
 Example 2:
@@ -243,61 +245,154 @@ Output: {"outages": [{"town_village": "Γεροσκήπου", "area_subdistrict"
 "part_of_area": "περιοχή πίσω από το παλιό ΚΕΝ Γεροσκήπου", "outage_cause": "fault", \
 "outage_from_date": "2026-07-26", "outage_from_time": "14:56", \
 "outage_to_date": "2026-07-27", "outage_to_time": ""}]}
+
+Example 3 (two villages in one announcement -> two objects):
+Announcement publish date: 2026-08-10
+Title: Διακοπή Yδροδότησης – Δήμος Πόλεως Χρυσοχούς
+Body: Ενημερώνουμε το κοινό ότι αύριο, Τρίτη 11/08/2026, από τις 08:00 μέχρι τις 14:00 \
+θα διακοπεί η υδροδότηση στα χωριά Γουδί και Χόλι λόγω εργασιών αντικατάστασης αγωγού.
+Output: {"outages": [{"town_village": "Γουδί", "area_subdistrict": "", "part_of_area": "", \
+"outage_cause": "scheduled", "outage_from_date": "2026-08-11", "outage_from_time": "08:00", \
+"outage_to_date": "2026-08-11", "outage_to_time": "14:00"}, {"town_village": "Χόλι", \
+"area_subdistrict": "", "part_of_area": "", "outage_cause": "scheduled", \
+"outage_from_date": "2026-08-11", "outage_from_time": "08:00", "outage_to_date": "2026-08-11", \
+"outage_to_time": "14:00"}]}
 """
+
+OUTAGE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["outages"],
+    "properties": {
+        "outages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["town_village", "area_subdistrict", "part_of_area", "outage_cause",
+                             "outage_from_date", "outage_from_time", "outage_to_date", "outage_to_time"],
+                "properties": {
+                    "town_village": {"type": "string"},
+                    "area_subdistrict": {"type": "string"},
+                    "part_of_area": {"type": "string"},
+                    "outage_cause": {"type": "string", "enum": ["fault", "scheduled"]},
+                    "outage_from_date": {"type": "string"},
+                    "outage_from_time": {"type": "string"},
+                    "outage_to_date": {"type": "string"},
+                    "outage_to_time": {"type": "string"},
+                },
+            },
+        }
+    },
+}
+
+
+def anthropic_client() -> anthropic.Anthropic:
+    # Credentials resolve from ANTHROPIC_API_KEY. The SDK already retries
+    # connection errors, 408/409/429 and 5xx with backoff.
+    return anthropic.Anthropic(timeout=LLM_TIMEOUT_S, max_retries=3)
+
+
+def _create(client: anthropic.Anthropic, user_content: str):
+    kwargs = dict(
+        model=ANTHROPIC_MODEL,
+        max_tokens=LLM_MAX_TOKENS,
+        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+        messages=[{"role": "user", "content": user_content}],
+        output_config={"format": {"type": "json_schema", "schema": OUTAGE_SCHEMA}},
+    )
+    try:
+        return client.beta.messages.create(betas=[FALLBACK_BETA], fallbacks="default", **kwargs)
+    except anthropic.BadRequestError as e:
+        # Only the fallback beta is optional -- if the API ever rejects it,
+        # degrade to a plain request rather than losing the extraction.
+        print(f"  llm request with refusal fallback rejected ({e.message}); "
+              f"retrying without it", file=sys.stderr)
+        return client.beta.messages.create(**kwargs)
+
+
+def _extract(client: anthropic.Anthropic, user_content: str, label: str) -> Optional[list]:
+    """One Claude call. Returns the outages list ([] when the model found no
+    outage in the text) or None when the call itself failed, so the caller can
+    leave the item for the next cycle."""
+    try:
+        r = _create(client, user_content)
+    except anthropic.RateLimitError as e:
+        print(f"  llm rate limited for {label}: {e.message}", file=sys.stderr)
+        return None
+    except anthropic.APIStatusError as e:
+        print(f"  llm api error {e.status_code} for {label}: {e.message}", file=sys.stderr)
+        return None
+    except anthropic.APIConnectionError as e:  # includes APITimeoutError
+        print(f"  llm connection error for {label}: {type(e).__name__}: {e}", file=sys.stderr)
+        return None
+
+    if r.stop_reason == "refusal":
+        sd = getattr(r, "stop_details", None)
+        print(f"  llm refused {label}: {getattr(sd, 'category', None)} "
+              f"{getattr(sd, 'explanation', '')}", file=sys.stderr)
+        return None
+    if r.stop_reason == "max_tokens":
+        print(f"  llm hit max_tokens for {label}", file=sys.stderr)
+        return None
+
+    u = r.usage
+    print(f"  llm ok {label}: model={r.model} in={u.input_tokens} "
+          f"cached={getattr(u, 'cache_read_input_tokens', 0) or 0} out={u.output_tokens} "
+          f"req={r._request_id}", file=sys.stderr)
+
+    text = next((b.text for b in r.content if b.type == "text"), "")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        print(f"  llm returned non-JSON for {label}: {text[:200]!r}", file=sys.stderr)
+        return None
+    outages = data.get("outages")
+    if not isinstance(outages, list):
+        print(f"  llm returned no outages array for {label}", file=sys.stderr)
+        return None
+    return outages
 
 
 def now_str() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def call_llm(client: httpx.Client, item: dict) -> Optional[list]:
+def call_llm(client: anthropic.Anthropic, item: dict) -> Optional[list]:
+    """Extract outages for one announcement. [] means the model read it and
+    found no outage (caller marks it seen); None means try again next cycle."""
     published_date = (item.get("published") or "")[:10]
     user_content = (
         f"Announcement publish date: {published_date or 'unknown'}\n"
         f"Title: {item['title']}\n"
         f"Body: {item['body']}"
     )
-    try:
-        r = client.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={
-                "model": OLLAMA_MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "format": "json",
-                "stream": False,
-                "keep_alive": OLLAMA_KEEP_ALIVE,
-                "options": {"temperature": 0.1},
-            },
-        )
-        r.raise_for_status()
-    except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.TransportError) as e:
-        print(f"  llm call failed for post {item['post_id']}: {type(e).__name__}: {e}",
-              file=sys.stderr)
+    label = f"post {item['post_id']}"
+    outages = _extract(client, user_content, label)
+    if outages is None:
         return None
-
-    content = r.json().get("message", {}).get("content", "")
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        print(f"  llm returned non-JSON for post {item['post_id']}: {content[:200]!r}",
-              file=sys.stderr)
-        return None
-
-    outages = data.get("outages")
-    if not isinstance(outages, list) or not outages:
-        print(f"  llm found no outages for post {item['post_id']}", file=sys.stderr)
-        return None
+    if not outages:
+        print(f"  llm found no outages for {label}", file=sys.stderr)
+        return []
 
     source_text = f"{item['title']} {item['body']}"
     kept = []
     for o in outages:
-        if isinstance(o, dict) and not grounded(o.get("town_village", ""), source_text):
-            print(f"  llm hallucinated ungrounded town_village {o.get('town_village')!r} "
-                  f"for post {item['post_id']}, dropping", file=sys.stderr)
+        if not isinstance(o, dict):
             continue
+        if not grounded(o.get("town_village", ""), source_text):
+            print(f"  llm hallucinated ungrounded town_village {o.get('town_village')!r} "
+                  f"for {item['permalink']}, dropping", file=sys.stderr)
+            continue
+        # area_subdistrict now drives resolution first (see mouxtaris-bot
+        # resolver), so a hallucinated neighbourhood could misroute the
+        # notification. Unlike town_village it is optional: blank it and
+        # keep the outage, which then resolves on town_village.
+        sub = o.get("area_subdistrict", "")
+        if sub and not grounded(sub, source_text):
+            print(f"  llm hallucinated ungrounded area_subdistrict {sub!r} "
+                  f"for {item['permalink']}, blanking", file=sys.stderr)
+            o["area_subdistrict"] = ""
         kept.append(o)
     if not kept:
         print(f"  llm found no grounded outages for post {item['post_id']}", file=sys.stderr)
@@ -305,8 +400,8 @@ def call_llm(client: httpx.Client, item: dict) -> Optional[list]:
     return kept
 
 
-def localize(date_s: str, time_s: str) -> str:
-    date_s, time_s = clean(date_s), clean(time_s) or "00:00"
+def localize(date_s: str, time_s: str, default_time: str = "00:00") -> str:
+    date_s, time_s = clean(date_s), clean(time_s) or default_time
     if not date_s:
         return ""
     try:
@@ -315,6 +410,22 @@ def localize(date_s: str, time_s: str) -> str:
         print(f"  bad date/time from llm: {date_s!r} {time_s!r}", file=sys.stderr)
         return ""
 
+
+# Generic place-type words the model sometimes keeps in front of a neighbourhood
+# name ("ενορία Αγίου Δημητρίου", "περιοχή Πάνθεα", "Δημοτικό Διαμέρισμα Κάτω
+# Πολεμιδιών"). The resolver token-matches the whole string against area names,
+# so the extra word dilutes the score; strip it so the bare name is compared.
+_SUB_PREFIX = re.compile(
+    r"^(?:(?:η|το|στην|στον|στο|της|του)\s+)?"
+    r"(?:ενορ[ιί]α|περιοχ[ηή]|συνοικ[ιί]α|γειτονι[αά]|δημοτικ[οό]\s+διαμ[εέ]ρισμα|δ\.?\s*δ\.?|κοιν[οό]τητα|δ[ηή]μος)"
+    r"\s+(?:(?:της|του|των)\s+)?",
+    re.IGNORECASE,
+)
+
+
+def clean_subdistrict(s: str) -> str:
+    s = clean(s)
+    return clean(_SUB_PREFIX.sub("", s)) or s
 
 def to_payloads(outages: list) -> List[dict]:
     payloads = []
@@ -329,12 +440,14 @@ def to_payloads(outages: list) -> List[dict]:
             "source": "eoa_pafos",
             "district": DISTRICT,
             "town_village": town,
-            "area_subdistrict": clean(o.get("area_subdistrict", "")),
+            "area_subdistrict": clean_subdistrict(o.get("area_subdistrict", "")),
             "part_of_area": clean(o.get("part_of_area", "")),
             "outage_type": "water",
             "outage_cause": cause if cause in ("fault", "scheduled") else "scheduled",
             "outage_from": localize(o.get("outage_from_date", ""), o.get("outage_from_time", "")),
-            "outage_to": localize(o.get("outage_to_date", ""), o.get("outage_to_time", "")),
+            # a restoration date with no time means "within that day": end of day,
+            # never 00:00, which would read as restored before the outage began
+            "outage_to": localize(o.get("outage_to_date", ""), o.get("outage_to_time", ""), "23:59"),
         })
     return payloads
 
@@ -371,6 +484,9 @@ def get_new_announcements(pages: int) -> List[dict]:
     return [it for it in items if it["post_id"] not in seen]
 
 
+_llm_failures: dict = {}  # item id -> failed llm attempts in this process
+
+
 def cycle(pages: int, ingest_url: str, ingest_token: str) -> None:
     fresh = get_new_announcements(pages)
     if not fresh:
@@ -378,33 +494,40 @@ def cycle(pages: int, ingest_url: str, ingest_token: str) -> None:
         return
     print(fresh)
     payloads: List[dict] = []
-    done_ids: List[int] = []
-    with httpx.Client(timeout=LLM_TIMEOUT) as llm_client:
+    done_ids: list = []
+    with anthropic_client() as llm_client:
         for it in fresh:
+            key = it["post_id"]
             outages = call_llm(llm_client, it)
             if outages is None:
-                continue  # left unseen -- retried next cycle
+                # Call failed or nothing grounded: leave unseen so it is retried
+                # next cycle -- but not forever, every retry is a paid request.
+                n = _llm_failures[key] = _llm_failures.get(key, 0) + 1
+                if n >= LLM_MAX_ATTEMPTS:
+                    print(f"  post {key}: giving up after {n} failed llm attempts, marking seen",
+                          file=sys.stderr)
+                    done_ids.append(key)
+                continue
             batch = to_payloads(outages)
             if not batch:
-                print(f"  post {it['post_id']}: no usable location extracted, skipping",
-                      file=sys.stderr)
+                print(f"  post {key}: no outage/location extracted, marking seen", file=sys.stderr)
+                done_ids.append(key)
                 continue
             payloads += batch
-            done_ids.append(it["post_id"])
+            done_ids.append(key)
 
-    if not payloads:
-        print(f"[{now_str()}] {len(fresh)} new announcement(s), 0 extracted successfully",
-              file=sys.stderr)
-        return
+    if payloads:
+        # push() raises on failure, so nothing below runs and the whole batch
+        # (including LLM successes) retries next cycle rather than being lost.
+        push(ingest_url, ingest_token, payloads)
+    else:
+        print(f"[{now_str()}] {len(fresh)} new announcement(s), 0 to push", file=sys.stderr)
 
-    push(ingest_url, ingest_token, payloads)
-
-    # Only mark extracted+pushed posts as seen -- if push() raised, we never
-    # reach here, and the whole batch (including LLM successes) retries next
-    # cycle rather than being lost.
-    seen = load_seen()
-    seen.update(done_ids)
-    save_seen(seen)
+    # Mark seen: everything pushed, plus items that definitively had nothing to push.
+    if done_ids:
+        seen = load_seen()
+        seen.update(done_ids)
+        save_seen(seen)
 
 
 def main() -> None:

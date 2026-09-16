@@ -39,7 +39,7 @@ jobs:
             cd ~/opt/mouxtaris/$svc
             [ -d .venv ] || python3.11 -m venv .venv
             .venv/bin/pip install --quiet --upgrade pip
-            .venv/bin/pip install --quiet httpx beautifulsoup4 html5lib
+            .venv/bin/pip install --quiet httpx beautifulsoup4 html5lib anthropic
             # A freshly created .venv/bin lands with the wrong SELinux type
             # (user_home_t) under this User=opc systemd services can't
             # execute -- see mouxtaris-bot/deploy/install.md for the same
