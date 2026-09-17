@@ -29,8 +29,8 @@ func ToAreaSeeds(areas []*resolve.Area) []AreaSeed {
 	for i, a := range areas {
 		seeds[i] = AreaSeed{
 			Key:       a.Key,
-			NameEL:    a.NameEL,
-			NameEN:    a.NameEN,
+			NameEL:    resolve.PrimaryName(a.NameEL),
+			NameEN:    resolve.PrimaryName(a.NameEN),
 			Level:     a.Level,
 			ParentKey: a.ParentKey,
 		}
