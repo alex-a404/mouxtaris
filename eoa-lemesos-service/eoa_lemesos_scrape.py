@@ -1,7 +1,7 @@
 # EOA Lemesos (eoalemesos.org.cy) water-interruption announcement scraper.
 #
 # Same shape as eoa_pafos_scrape.py (discovery -> LLM extraction -> push,
-# dedup by seen-set so only new announcements get pushed) but eoalemesos.org.cy
+# dedup by a seen-store so only new content gets pushed) but eoalemesos.org.cy
 # is not WordPress: no RSS feed, no wp-json. The /el/faults listing is a
 # plain paginated HTML page (page 1 at /el/faults, older pages at
 # /el/faults/2, /el/faults/3, ... -- past the last page it 200s with an
@@ -9,9 +9,17 @@
 # permalink, which is also the only stable id available (no numeric post id
 # like WP's ?p=N), and the listing only shows a truncated excerpt -- the
 # full body has to be fetched from the detail page.
+#
+# EOA Lemesos also keeps ONE post per day and edits it in place, appending
+# each new fault area (and revised restoration times) to the same permalink
+# through the day. A permalink-only seen-set never notices that, so the
+# store keeps a content hash per permalink and recent posts are re-fetched
+# every cycle; when the hash changes the post is re-extracted and only the
+# outages not already pushed for it go out (see payload_key).
 
 import argparse, json, os, random, re, sys, time, unicodedata
-from datetime import datetime
+from datetime import date, datetime
+from hashlib import sha1
 from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
@@ -47,9 +55,34 @@ TZ = ZoneInfo("Asia/Nicosia")
 WS = re.compile(r"\s+")
 SEEN_STORE = Path(os.environ.get("SEEN_STORE", Path(__file__).with_name("eoa_lemesos_seen.json")))
 
+# Seen posts listed with a date this many days old (or newer) are re-fetched
+# every cycle to catch in-place edits; older posts are not edited any more.
+RECHECK_DAYS = 1
+
 
 def clean(s: str) -> str:
     return WS.sub(" ", s or "").strip()
+
+
+def content_hash(title: str, body: str) -> str:
+    return sha1(f"{clean(title)}\n{body}".encode("utf-8")).hexdigest()[:16]
+
+
+def payload_key(p: dict) -> str:
+    """Identity of one pushed outage: the dispatcher's natural key (place +
+    streets + start) plus the restoration time. A re-extracted post pushes
+    only the payloads whose key it has not pushed before, so an edit that
+    adds one area (or moves one restoration time) does not re-notify the
+    subscribers of every area the post already announced."""
+    return "|".join(clean(str(p.get(k, ""))).lower() for k in
+                    ("town_village", "area_subdistrict", "part_of_area", "outage_from", "outage_to"))
+
+
+def is_recent(listing_date_raw: str) -> bool:
+    d = parse_listing_date(listing_date_raw)
+    if d is None:
+        return True  # unknown date: err on the side of re-checking
+    return (datetime.now(TZ).date() - date.fromisoformat(d)).days <= RECHECK_DAYS
 
 
 def _fold(s: str) -> str:
@@ -481,30 +514,54 @@ def push(url: str, token: str, payloads: List[dict]) -> None:
     print(json.dumps(payloads, ensure_ascii=False))
 
 
-def load_seen() -> set:
+def load_seen() -> dict:
+    """permalink -> {"hash": content hash of the title+body last extracted,
+    "sent": [payload keys pushed for it so far]}. Entries from the older
+    list-only store come back with hash None; the next cycle fills that in
+    from the live page without pushing (the post was announced when first
+    seen)."""
     if SEEN_STORE.exists():
         try:
-            return set(json.loads(SEEN_STORE.read_text()))
+            data = json.loads(SEEN_STORE.read_text())
         except (json.JSONDecodeError, OSError):
-            pass
-    return set()
+            return {}
+        if isinstance(data, list):
+            return {k: {"hash": None, "sent": []} for k in data}
+        if isinstance(data, dict):
+            return data
+    return {}
 
 
-def save_seen(seen: set) -> None:
-    SEEN_STORE.write_text(json.dumps(sorted(seen)))
+def save_seen(seen: dict) -> None:
+    SEEN_STORE.write_text(json.dumps(seen, ensure_ascii=False, sort_keys=True, indent=1))
 
 
-def get_new_announcements(client: httpx.Client, pages: int) -> List[dict]:
+def get_new_announcements(client: httpx.Client, pages: int, seen: dict) -> List[dict]:
+    """Announcements that need extracting: never-seen permalinks, plus recent
+    seen ones whose detail page no longer matches the content hash on record
+    (edited in place). Each item carries its store entry as "prev" (None when
+    new) so the caller can push only what it has not pushed before. Entries
+    that still lack a hash get one here (mutating `seen`) without being
+    returned."""
     listed = fetch_pages(client, pages)
-    seen = load_seen()
-    fresh = [it for it in listed if it["permalink"] not in seen]
-
     out = []
-    for it in fresh:
+    for it in listed:
+        prev = seen.get(it["permalink"])
+        if prev is not None and not is_recent(it["listing_date_raw"]):
+            continue
         html = fetch(client, it["permalink"], referer=LISTING)
         if html is None:
-            continue  # left unseen -- retried next cycle
+            continue  # retried next cycle
+        time.sleep(1)
         detail = parse_detail(html)
+        h = content_hash(it["title"], detail["body"])
+        if prev is not None:
+            if prev.get("hash") is None:
+                prev["hash"] = h  # baseline for an entry migrated from the old store
+                continue
+            if prev["hash"] == h:
+                continue
+            print(f"  {it['permalink']}: edited since last extraction", file=sys.stderr)
         date_raw = detail["date_raw"] or it["listing_date_raw"]
         published = parse_listing_date(date_raw)
         out.append({
@@ -513,8 +570,9 @@ def get_new_announcements(client: httpx.Client, pages: int) -> List[dict]:
             "published": f"{published}T00:00:00" if published else None,
             "published_raw": date_raw,
             "body": detail["body"],
+            "hash": h,
+            "prev": prev,
         })
-        time.sleep(1)
     return out
 
 
@@ -522,50 +580,58 @@ _llm_failures: dict = {}  # item id -> failed llm attempts in this process
 
 
 def cycle(pages: int, ingest_url: str, ingest_token: str) -> None:
+    seen = load_seen()
     with httpx.Client(headers=BROWSER_HEADERS, follow_redirects=True, timeout=TIMEOUT) as client:
-        fresh = get_new_announcements(client, pages)
+        fresh = get_new_announcements(client, pages, seen)
     if not fresh:
-        print(f"[{now_str()}] 0 new announcement(s)", file=sys.stderr)
+        print(f"[{now_str()}] 0 new/edited announcement(s)", file=sys.stderr)
+        save_seen(seen)  # may carry freshly baselined hashes
         return
     print(fresh)
     payloads: List[dict] = []
-    done_ids: list = []
+    done: list = []  # (permalink, content hash, payload keys pushed) to record
     with anthropic_client() as llm_client:
         for it in fresh:
             key = it["permalink"]
             outages = call_llm(llm_client, it)
             if outages is None:
-                # Call failed or nothing grounded: leave unseen so it is retried
-                # next cycle -- but not forever, every retry is a paid request.
+                # Call failed or nothing grounded: leave the store as is so it
+                # is retried next cycle -- but not forever, every retry is a
+                # paid request.
                 n = _llm_failures[key] = _llm_failures.get(key, 0) + 1
                 if n >= LLM_MAX_ATTEMPTS:
                     print(f"  {key}: giving up after {n} failed llm attempts, marking seen",
                           file=sys.stderr)
-                    done_ids.append(key)
+                    done.append((key, it["hash"], []))
                 continue
-            batch = to_payloads(outages)
+            already = set((it["prev"] or {}).get("sent", []))
+            batch = [p for p in to_payloads(outages) if payload_key(p) not in already]
             if not batch:
-                print(f"  {key}: no outage/location extracted, marking seen", file=sys.stderr)
-                done_ids.append(key)
-                continue
+                print(f"  {key}: nothing new to push, marking seen", file=sys.stderr)
             payloads += batch
-            done_ids.append(key)
+            done.append((key, it["hash"], [payload_key(p) for p in batch]))
 
     if payloads:
         # push() raises on failure, so nothing below runs and the whole batch
         # (including LLM successes) retries next cycle rather than being lost.
         push(ingest_url, ingest_token, payloads)
     else:
-        print(f"[{now_str()}] {len(fresh)} new announcement(s), 0 to push", file=sys.stderr)
+        print(f"[{now_str()}] {len(fresh)} new/edited announcement(s), 0 to push", file=sys.stderr)
 
-    # Mark seen: everything pushed, plus items that definitively had nothing to push.
-    if done_ids:
-        seen = load_seen()
-        seen.update(done_ids)
-        save_seen(seen)
+    # Record: the content each pushed/settled post was extracted from, and
+    # which payloads have gone out for it, so a later edit pushes only the delta.
+    for key, h, keys in done:
+        entry = seen.setdefault(key, {"hash": None, "sent": []})
+        entry["hash"] = h
+        entry["sent"] = sorted(set(entry.get("sent", [])) | set(keys))
+    save_seen(seen)
 
 
 def main() -> None:
+    # Under systemd stdout is a pipe, so without this the payload/item dumps sit
+    # in an 8 KiB buffer for days and land in the journal next to unrelated,
+    # unbuffered stderr lines -- useless for reading what happened when.
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="single pass, then exit")
     ap.add_argument("--interval", type=int, default=900, help="loop gap seconds")

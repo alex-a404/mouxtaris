@@ -66,5 +66,20 @@
     "parent_key": "Q59153",
     "lat": 34.98278,
     "lon": 33.65444
+  },
+  "Ξυλοτύμβου": {
+    "parent_key": "Q59153"
+  },
+  "Q81570": {
+    "parent_key": "Q59153"
+  },
+  "Lefkoşa": {
+    "parent_key": "Q556055"
+  },
+  "Q7030537": {
+    "parent_key": "Q556055"
+  },
+  "Q56037497": {
+    "name_en": "Nicosia;Lefkosia"
   }
 }

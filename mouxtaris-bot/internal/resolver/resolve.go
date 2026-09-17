@@ -226,11 +226,22 @@ func (p *place) containsPoint(x, y float64) bool {
 	return false
 }
 
-func displayName(p *place) string {
-	if strings.TrimSpace(p.nameEN) != "" {
-		return p.nameEN
+// PrimaryName strips alias variants from a name. A name may carry extra
+// matching aliases after ";" (e.g. "Nicosia;Lefkosia" so EAC's Latin
+// "Lefkosia" scores against Nicosia); only the part before the first ";" is
+// ever shown to users or stored as the display name.
+func PrimaryName(name string) string {
+	if i := strings.Index(name, ";"); i >= 0 {
+		name = name[:i]
 	}
-	return p.nameEL
+	return strings.TrimSpace(name)
+}
+
+func displayName(p *place) string {
+	if PrimaryName(p.nameEN) != "" {
+		return PrimaryName(p.nameEN)
+	}
+	return PrimaryName(p.nameEL)
 }
 
 const tokenHit = 0.80
