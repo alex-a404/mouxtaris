@@ -235,9 +235,15 @@ Field rules:
   neighbourhood/quarter ("περιοχή Χ", "ενορία Χ", "συνοικία Χ") or a municipal
   district ("Δημοτικό Διαμέρισμα Χ" -> "Χ") -- as a proper place name in nominative
   form. NOT a street. Only a name written in the Row. Else "".
-- part_of_area: the street name(s) affected (e.g. "Ηπείρου, Σταύρου Βενιζέλου" -- if
+- part_of_area: the street name(s) affected (e.g. "Ipeirou, Stavrou Venizelou" -- if
   several, join ALL with ", "), and any other descriptive qualifier that is not a
-  place name (e.g. "Νέος Οικισμός και Βιομηχανική Περιοχή", "ΟΛΟ ΤΟ ΧΩΡΙΟ"). Else "".
+  place name (e.g. "New Settlement and Industrial Area", "Whole village").
+  Write this field in Latin script, as on Cyprus road signs: transliterate every
+  street name letter by letter (ELOT 743 -- "ΠΡΟΜΗΘΕΩΣ" -> "Promitheos", "Σταύρου
+  Βενιζέλου" -> "Stavrou Venizelou", "Λεωφόρος Μακαρίου Γ'" -> "Makariou III Avenue")
+  in Title Case, never translate a name's meaning, and translate the surrounding
+  descriptive words into English ("ανατολικά της οδού Χ" -> "east of X street").
+  Else "".
 - Dates in the row are given as DD/MM/YY or DD/MM/YYYY -- a 2-digit year "26" means
   2026. Convert to YYYY-MM-DD. You are also given today's date as a reference for any
   relative phrasing.
@@ -263,7 +269,7 @@ Row: ΔΗΜΟΣ/ΚΟΙΝΟΤΗΤΑ: Λατσιά (περ.21) | ΑΝΑΦΟΡΑ: �
 ΛΑΤΣΙΑ, ΗΠΕΙΡΟΥ, ΣΤΑΥΡΟΥ ΒΕΝΙΖΕΛΟΥ λόγω βλάβης σε κεντρικό αγωγό. | ΩΡΑ ΔΙΑΚΟΠΗΣ: 05/08/26 | \
 ΕΚΤΙΜΩΜΕΝΟΣ ΧΡΟΝΟΣ ΕΠΑΝΑΦΟΡΑΣ: 05/08/26
 Output: {"outages": [{"town_village": "Λατσιά", "area_subdistrict": "", \
-"part_of_area": "Ηπείρου, Σταύρου Βενιζέλου", "outage_from_date": "2026-08-05", \
+"part_of_area": "Ipeirou, Stavrou Venizelou", "outage_from_date": "2026-08-05", \
 "outage_from_time": "", "outage_to_date": "2026-08-05", "outage_to_time": ""}]}
 
 Example 2:
@@ -273,7 +279,7 @@ Row: ΔΗΜΟΣ/ΚΟΙΝΟΤΗΤΑ: Μάμμαρι | ΕΠΗΡΕΑΖΟΜΕΝΕΣ 
 εξυπηρετούν τον νέο οικισμό και τη βιομηχανική περιοχή Μαμμαρίου | ΕΚΤΙΜΩΜΕΝΗ ΩΡΑ \
 ΔΙΑΚΟΠΗΣ: 03/06/26 | ΕΚΤΙΜΩΜΕΝΟΣ ΧΡΟΝΟΣ ΕΠΑΝΑΦΟΡΑΣ: Εντός της ημέρας
 Output: {"outages": [{"town_village": "Μάμμαρι", "area_subdistrict": "", \
-"part_of_area": "Νέος Οικισμός και Βιομηχανική Περιοχή", "outage_from_date": "2026-06-03", \
+"part_of_area": "New Settlement and Industrial Area", "outage_from_date": "2026-06-03", \
 "outage_from_time": "", "outage_to_date": "2026-06-03", "outage_to_time": ""}]}
 
 Example 3:
@@ -282,7 +288,7 @@ Row: ΔΗΜΟΣ/ΚΟΙΝΟΤΗΤΑ: Αλάμπρα | ΑΝΑΦΟΡΑ: Ενημε�
 (περ.30) , ΟΛΟ ΤΟ ΧΩΡΙΟ λόγω βλάβης σε κεντρικό αγωγό. Εκτιμούμε ότι θα διορθωθεί μέχρι το \
 μεσημέρι. | ΩΡΑ ΔΙΑΚΟΠΗΣ: 26/08/26 | ΕΚΤΙΜΩΜΕΝΟΣ ΧΡΟΝΟΣ ΕΠΑΝΑΦΟΡΑΣ: Μέχρι το μεσημέρι
 Output: {"outages": [{"town_village": "Αλάμπρα", "area_subdistrict": "", \
-"part_of_area": "ΟΛΟ ΤΟ ΧΩΡΙΟ", "outage_from_date": "2026-08-26", "outage_from_time": "", \
+"part_of_area": "Whole village", "outage_from_date": "2026-08-26", "outage_from_time": "", \
 "outage_to_date": "2026-08-26", "outage_to_time": "12:00"}]}
 
 Example 4 (two communities in one row -> two objects):
@@ -436,6 +442,17 @@ def localize(date_s: str, time_s: str, default_time: str = "00:00") -> str:
         return ""
 
 
+def from_time_or_now(date_s: str, time_s: str) -> str:
+    """The start time to use for outage_from: the one the text gives, else --
+    when the outage starts today -- the moment we are reading the announcement
+    (a fault announced this morning reads as 09:25, not 00:00), else midnight."""
+    time_s = clean(time_s)
+    if time_s:
+        return time_s
+    now = datetime.now(TZ)
+    return now.strftime("%H:%M") if clean(date_s) == now.date().isoformat() else "00:00"
+
+
 # Generic place-type words the model sometimes keeps in front of a neighbourhood
 # name ("ενορία Αγίου Δημητρίου", "περιοχή Πάνθεα", "Δημοτικό Διαμέρισμα Κάτω
 # Πολεμιδιών"). The resolver token-matches the whole string against area names,
@@ -452,6 +469,27 @@ def clean_subdistrict(s: str) -> str:
     s = clean(s)
     return clean(_SUB_PREFIX.sub("", s)) or s
 
+def already_over(outage_to_iso: str) -> bool:
+    """True if outage_to is a real timestamp and it's already in the past.
+    "Fault"/"Τρέχουσες Βλάβες" rows are deliberately NOT date-filtered in
+    parse_page (a fault can legitimately still be open days after it
+    started, with no end date given yet) -- but NDLGO doesn't reliably
+    remove/hide a row once it IS resolved (is_retired only catches rows
+    toggled hidden-on-desktop/tablet/mobile; a plain stale row with its own
+    restoration date/time already passed slips through as still "current").
+    Once the row itself states a restoration that has already happened,
+    there's no ambiguity left: it's over, and pushing it would tell
+    subscribers about an outage that ended days ago as if it just started
+    (seen for real: Lakatamia 2026-09-16, Alampra 2026-09-18 -- both pushed
+    as "created" 2+ days stale)."""
+    if not outage_to_iso:
+        return False
+    try:
+        return datetime.fromisoformat(outage_to_iso) < datetime.now(TZ)
+    except ValueError:
+        return False
+
+
 def to_payloads(outages: list, cause: str) -> List[dict]:
     payloads = []
     for o in outages:
@@ -460,6 +498,11 @@ def to_payloads(outages: list, cause: str) -> List[dict]:
         town = clean(o.get("town_village", ""))
         if not town:
             continue  # unusable without a place to resolve against
+        outage_to = localize(o.get("outage_to_date", ""), o.get("outage_to_time", ""), "23:59")
+        if already_over(outage_to):
+            print(f"  skipping already-over outage for {town!r} (outage_to={outage_to})",
+                  file=sys.stderr)
+            continue
         payloads.append({
             "source": "eoa_lefkosia",
             "district": DISTRICT,
@@ -471,7 +514,7 @@ def to_payloads(outages: list, cause: str) -> List[dict]:
             "outage_from": localize(o.get("outage_from_date", ""), o.get("outage_from_time", "")),
             # a restoration date with no time means "within that day": end of day,
             # never 00:00, which would read as restored before the outage began
-            "outage_to": localize(o.get("outage_to_date", ""), o.get("outage_to_time", ""), "23:59"),
+            "outage_to": outage_to,
         })
     return payloads
 
@@ -530,6 +573,12 @@ def cycle(ingest_url: str, ingest_token: str) -> None:
                     print(f"  row: giving up after {n} failed llm attempts, caching as empty",
                           file=sys.stderr)
                     outages = []
+                for o in outages:
+                    if isinstance(o, dict) and not clean(o.get("outage_from_time", "")):
+                        # Stamp the start time once, at first sight: this cached
+                        # row is re-pushed every cycle and its start must not
+                        # drift with the clock (that would re-key it each push).
+                        o["outage_from_time"] = from_time_or_now(o.get("outage_from_date", ""), "")
                 cache[row["row_hash"]] = outages
                 cached = outages
             payloads += to_payloads(cached, row["cause"])
