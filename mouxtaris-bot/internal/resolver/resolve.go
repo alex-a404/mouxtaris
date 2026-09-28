@@ -906,16 +906,30 @@ func foldDistrict(s string) string {
 func buildVariants(a *Area) [][]string {
 	var vs [][]string
 	seen := map[string]bool{}
+	add := func(part string) {
+		toks := tokenise(part)
+		if len(toks) == 0 {
+			return
+		}
+		joined := strings.Join(toks, " ")
+		if !seen[joined] {
+			seen[joined] = true
+			vs = append(vs, toks)
+		}
+	}
 	for _, name := range []string{a.NameEL, a.NameEN} {
 		for _, part := range strings.Split(name, ";") {
-			toks := tokenise(part)
-			if len(toks) == 0 {
-				continue
-			}
-			joined := strings.Join(toks, " ")
-			if !seen[joined] {
-				seen[joined] = true
-				vs = append(vs, toks)
+			add(part)
+			// Also index a transliterated form of a Greek name. Resolve()
+			// already transliterates a *Greek query* so it can match a
+			// Latin-only name; this is the mirror image, for a *Latin query*
+			// against a name whose Greek carries a word the name:en drops --
+			// e.g. "Κοινότητα Πύργου Λεμεσού" has name:en "Pyrgos Community",
+			// so EAC's English "Pyrgos Lemesou" had no candidate token for
+			// "Lemesou" and scored 0.625, under minScore. Indexing
+			// "pyrgou lemesou" gives it one.
+			if hasGreek(part) {
+				add(greekToLatin(part))
 			}
 		}
 	}
