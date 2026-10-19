@@ -30,7 +30,6 @@ import (
 type Resolver struct {
 	places    []*place
 	byKey     map[string]*place
-	districts map[string]*place // foldDistrict key -> level-5 district place
 	children  map[string][]string
 	minScore  float64
 	minMargin float64
@@ -64,14 +63,6 @@ func New(areas []*Area) *Resolver {
 	for _, p := range r.places {
 		if p.parent != "" {
 			r.children[p.parent] = append(r.children[p.parent], p.key)
-		}
-	}
-	r.districts = make(map[string]*place, len(roCDistricts))
-	for _, p := range r.places {
-		if p.level == 5 {
-			if d := foldDistrict(p.nameEL + " " + p.nameEN); roCDistricts[d] {
-				r.districts[d] = p
-			}
 		}
 	}
 	return r
@@ -180,19 +171,10 @@ func (r *Resolver) Resolve(o outages.OutageReport) (key, name string, matchedSub
 			}
 		}
 	}
-	// Last resort: the source named a place we have no feature for -- typically
-	// a colloquial neighbourhood like "Αριέλ" in Limassol, which is no admin
-	// unit in OSM -- but the district is known. Resolve to the district so its
-	// subscribers still hear about it, instead of silently dropping the outage,
-	// and keep the raw town name in the display so the message stays specific.
-	if p, ok := r.districts[foldDistrict(district)]; ok {
-		name := displayName(p)
-		if t := strings.TrimSpace(o.TownVillage); t != "" {
-			name = fmt.Sprintf("%s - %s", name, t)
-		}
-		log.Printf("resolve %q: no place match, falling back to district %q", o.RawLocation(), p.key)
-		return p.key, name, false, true
-	}
+	// No district fallback: nobody subscribes at district level, so it would
+	// notify no one while hiding the miss from the resolve-failure metric.
+	// Unknown places (e.g. a colloquial neighbourhood) get an alias in
+	// overrides.json instead.
 	return "", "", false, false
 }
 
@@ -239,8 +221,7 @@ func (r *Resolver) Chain(areaKey string) []string {
 // The downward half also covers the area's same-named twins on the chain
 // (OSM models Limassol as both "Limassol" and "Limassol Municipality", and a
 // neighbourhood may hang under either), but never a district: an outage
-// resolved only to a district -- including Resolve's unmatched-place fallback
-// -- would otherwise reach every subscriber in it.
+// resolved only to a district would otherwise reach every subscriber in it.
 func (r *Resolver) Audience(areaKey string) []string {
 	chain := r.Chain(areaKey)
 	out := append([]string(nil), chain...)

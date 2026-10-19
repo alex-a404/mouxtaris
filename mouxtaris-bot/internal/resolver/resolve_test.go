@@ -93,16 +93,13 @@ func TestAliasResolvesToPlace(t *testing.T) {
 	}
 }
 
-// TestUnknownPlaceFallsBackToDistrict: a place with no feature and no alias
-// still reaches the district's subscribers instead of being dropped.
-func TestUnknownPlaceFallsBackToDistrict(t *testing.T) {
+// TestUnknownPlaceIsUnresolved: a place with no feature and no alias is a
+// resolve failure (counted in metrics) even when the district is known --
+// the fix is an alias in overrides.json, not a district fallback.
+func TestUnknownPlaceIsUnresolved(t *testing.T) {
 	r := testResolver(t)
-	_, name, _, ok := r.Resolve(outages.OutageReport{District: "Lemesos", TownVillage: "Ψψψψψ"})
-	if !ok || name != "Limassol District - Ψψψψψ" {
-		t.Errorf("Resolve = (%q, ok=%v), want %q", name, ok, "Limassol District - Ψψψψψ")
-	}
-	if _, _, _, ok := r.Resolve(outages.OutageReport{TownVillage: "Ψψψψψ"}); ok {
-		t.Errorf("Resolve with no district resolved, want unresolved")
+	if _, _, _, ok := r.Resolve(outages.OutageReport{District: "Lemesos", TownVillage: "Ψψψψψ"}); ok {
+		t.Errorf("Resolve of unknown place resolved, want unresolved")
 	}
 }
 
@@ -135,7 +132,16 @@ func TestAudienceReachesContainedAreas(t *testing.T) {
 		// hang under either, and none of East Limassol Municipality may leak in
 		{"Lemesos", "Λεμεσός", []string{"Limassol", "Zakaki", "Agia Zoni", "Limassol District"}, []string{"Germasogeia Municipality", "Potamos Germasogeias"}},
 		{"Lemesos", "Ζακάκι", []string{"Zakaki", "Limassol", "Limassol District"}, []string{"Agia Zoni"}},
-		{"Lemesos", "Ψψψψψ", []string{"Limassol District"}, []string{"Limassol", "Zakaki"}},
+	}
+	// a district-level outage must not fan out to every area in it
+	for _, p := range r.places {
+		if p.level == 5 && displayName(p) == "Limassol District" {
+			for _, k := range r.Audience(p.key) {
+				if q := r.byKey[k]; q != nil && (displayName(q) == "Limassol" || displayName(q) == "Zakaki") {
+					t.Errorf("Audience(Limassol District) wrongly includes %q", displayName(q))
+				}
+			}
+		}
 	}
 	for _, c := range cases {
 		got := audience(c.district, c.town)
