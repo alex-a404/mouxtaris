@@ -69,3 +69,85 @@ func TestEveryNameResolvesToItself(t *testing.T) {
 		}
 	}
 }
+
+// TestAliasResolvesToPlace covers EOA Lemesos's 2026-10-21 Ariel announcement:
+// "Αριέλ" is a Limassol neighbourhood with no OSM feature, so it is a manual
+// alias (overrides.json) on Limassol, and the message keeps the raw name.
+func TestAliasResolvesToPlace(t *testing.T) {
+	r := testResolver(t)
+	cases := []struct {
+		town, sub, want string
+		wantSub         bool
+	}{
+		{"Αριέλ", "", "Limassol - Αριέλ", false},
+		{"Ariel", "", "Limassol - Ariel", false},
+		// the display already carries the subdistrict, so the renderer must not
+		// append it again
+		{"Λεμεσός", "Αριέλ", "Limassol - Αριέλ", true},
+	}
+	for _, c := range cases {
+		key, name, sub, ok := r.Resolve(outages.OutageReport{District: "Lemesos", TownVillage: c.town, AreaSubdistrict: c.sub})
+		if !ok || key != "Q28870916" || name != c.want || sub != c.wantSub {
+			t.Errorf("Resolve(%q, %q) = (%s, %q, sub=%v, ok=%v), want (Q28870916, %q)", c.town, c.sub, key, name, sub, ok, c.want)
+		}
+	}
+}
+
+// TestUnknownPlaceFallsBackToDistrict: a place with no feature and no alias
+// still reaches the district's subscribers instead of being dropped.
+func TestUnknownPlaceFallsBackToDistrict(t *testing.T) {
+	r := testResolver(t)
+	_, name, _, ok := r.Resolve(outages.OutageReport{District: "Lemesos", TownVillage: "Ψψψψψ"})
+	if !ok || name != "Limassol District - Ψψψψψ" {
+		t.Errorf("Resolve = (%q, ok=%v), want %q", name, ok, "Limassol District - Ψψψψψ")
+	}
+	if _, _, _, ok := r.Resolve(outages.OutageReport{TownVillage: "Ψψψψψ"}); ok {
+		t.Errorf("Resolve with no district resolved, want unresolved")
+	}
+}
+
+// TestAudienceReachesContainedAreas: a subscriber to a smaller area must hear
+// about an outage announced for a broader area containing it (Potamos
+// Germasogeias for all of Germasogeia), but not about a sibling's outage, and
+// a district-level outage must not fan out to every area in the district.
+func TestAudienceReachesContainedAreas(t *testing.T) {
+	r := testResolver(t)
+	audience := func(district, town string) map[string]bool {
+		t.Helper()
+		key, _, _, ok := r.Resolve(outages.OutageReport{District: district, TownVillage: town})
+		if !ok {
+			t.Fatalf("Resolve(%q) did not resolve", town)
+		}
+		set := map[string]bool{}
+		for _, k := range r.Audience(key) {
+			if p := r.byKey[k]; p != nil {
+				set[displayName(p)] = true
+			}
+		}
+		return set
+	}
+	cases := []struct {
+		district, town string
+		want, notWant  []string
+	}{
+		{"Lemesos", "Γερμασόγεια", []string{"Germasogeia Municipality", "Potamos Germasogeias", "Limassol District"}, []string{"Limassol", "Zakaki"}},
+		// "Limassol" (city) and "Limassol Municipality" are twins; parishes
+		// hang under either, and none of East Limassol Municipality may leak in
+		{"Lemesos", "Λεμεσός", []string{"Limassol", "Zakaki", "Agia Zoni", "Limassol District"}, []string{"Germasogeia Municipality", "Potamos Germasogeias"}},
+		{"Lemesos", "Ζακάκι", []string{"Zakaki", "Limassol", "Limassol District"}, []string{"Agia Zoni"}},
+		{"Lemesos", "Ψψψψψ", []string{"Limassol District"}, []string{"Limassol", "Zakaki"}},
+	}
+	for _, c := range cases {
+		got := audience(c.district, c.town)
+		for _, w := range c.want {
+			if !got[w] {
+				t.Errorf("Audience(%q) missing %q", c.town, w)
+			}
+		}
+		for _, w := range c.notWant {
+			if got[w] {
+				t.Errorf("Audience(%q) wrongly includes %q", c.town, w)
+			}
+		}
+	}
+}

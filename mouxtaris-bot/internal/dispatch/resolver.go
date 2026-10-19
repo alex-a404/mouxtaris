@@ -4,5 +4,5 @@ import "mouxtaris.com/dispatcher/internal/outages"
 
 type Resolver interface {
 	Resolve(outage outages.OutageReport) (areaKey, displayName string, matchedSubdistrict, ok bool)
-	Chain(areaKey string) []string
+	Audience(areaKey string) []string
 }

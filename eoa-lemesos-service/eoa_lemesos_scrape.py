@@ -31,6 +31,10 @@ from bs4 import BeautifulSoup
 ROOT = "https://eoalemesos.org.cy/"
 LISTING = "https://eoalemesos.org.cy/el/faults"
 DISTRICT = "Lemesos"
+# The prompt tells the model to file a bare city neighbourhood ("περιοχή Αριέλ")
+# under the city itself, which a post need not spell out -- so this one
+# town_village is exempt from the grounding check.
+CITY = "Λεμεσός"
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:152.0) Gecko/20100101 Firefox/152.0",
@@ -233,11 +237,14 @@ Output ONLY a JSON object of the form:
 
 Field rules:
 - town_village: the municipality/village/community named in the text (e.g. "Ζακάκι",
-  "Πολεμίδια"), in Greek, in its nominative (dictionary) form. Required -- if you
-  cannot find one, omit that outage from the array entirely. Never invent or guess a
+  "Πολεμίδια"), in Greek, in its nominative (dictionary) form. Never invent or guess a
   place name from general knowledge of the district, and never reuse a name from these
   instructions' examples -- only output a name that is actually written in the
-  Title or Body given to you.
+  Title or Body given to you. One exception: when the text names only a
+  neighbourhood/locality of the city ("περιοχή Χ", e.g. Αριέλ, Ομόνοια, Καψάλος) and
+  no municipality or community, set town_village to "Λεμεσός" and put the
+  neighbourhood in area_subdistrict -- a neighbourhood is never a town_village.
+  If the text names no place at all, omit that outage from the array entirely.
 - area_subdistrict: the NAMED sub-area of that town if the text gives one -- a
   neighbourhood/quarter ("περιοχή Χ", "ενορία Χ", "συνοικία Χ"), a municipal district
   ("Δημοτικό Διαμέρισμα Χ" -> "Χ"), or a village inside a merged municipality -- as a
@@ -315,6 +322,17 @@ Output: {"outages": [{"town_village": "Πολεμίδια", "area_subdistrict": 
 "part_of_area": "Road No. 97, Derkylidas, Road No. 95, Panagi Koutalianou", \
 "outage_cause": "fault", "outage_from_date": "2026-09-07", "outage_from_time": "", \
 "outage_to_date": "2026-09-07", "outage_to_time": "15:00"}]}
+
+Example 4 (city neighbourhood with no municipality named -> town_village "Λεμεσός"):
+Announcement publish date: 2026-08-03
+Title: Προγραμματισμένη διακοπή νερού στην περιοχή Καψάλου την Τρίτη 4 Αυγούστου
+Body: Ο ΕΟΑ Λεμεσού ενημερώνει το κοινό ότι θα πραγματοποιηθεί προγραμματισμένη \
+διακοπή παροχής νερού στην περιοχή Καψάλου, την Τρίτη, 4 Αυγούστου 2026. Επηρεάζονται \
+οι πιο κάτω οδοί: •Ηρακλέους •Ορφέως. Η διακοπή θα διαρκέσει από τις 08:00 έως τις 14:00.
+Output: {"outages": [{"town_village": "Λεμεσός", "area_subdistrict": "Καψάλος", \
+"part_of_area": "Irakleous, Orfeos", "outage_cause": "scheduled", \
+"outage_from_date": "2026-08-04", "outage_from_time": "08:00", \
+"outage_to_date": "2026-08-04", "outage_to_time": "14:00"}]}
 """
 
 OUTAGE_SCHEMA = {
@@ -440,7 +458,8 @@ def call_llm(client: anthropic.Anthropic, item: dict) -> Optional[list]:
     for o in outages:
         if not isinstance(o, dict):
             continue
-        if not grounded(o.get("town_village", ""), source_text):
+        town = o.get("town_village", "")
+        if clean(town) != CITY and not grounded(town, source_text):
             print(f"  llm hallucinated ungrounded town_village {o.get('town_village')!r} "
                   f"for {item['permalink']}, dropping", file=sys.stderr)
             continue
