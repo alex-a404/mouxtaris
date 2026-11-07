@@ -1,5 +1,6 @@
 ## Mouxtaris (Cyprus Outage Bot)
-Try it out: t.me/mouxtarisbot
+Try it out: https://t.me/mouxtarisbot  
+[Grafana dashboard with live outages](https://mouxtaris.grafana.net/public-dashboards/fdd2d1d719b84fffa659a9500a3d9115)
 
 ### Overview
 Mouxtaris (neighborhood administrator) is a Telegram bot that alerts users when power or water interruptions affect their areas in Cyprus.
