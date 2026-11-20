@@ -47,9 +47,7 @@ func (s *Service) Notify(ctx context.Context, outage outages.OutageReport) error
 		return fmt.Errorf("dispatch: %w (%q)", ErrUnresolved, outage.RawLocation())
 	}
 
-	chain := s.resolver.Chain(areaKey)
-
-	userIDs, err := s.userRepo.SubscribersForAreas(ctx, chain)
+	userIDs, err := s.userRepo.SubscribersForAreas(ctx, s.resolver.Audience(areaKey))
 	if err != nil {
 		return fmt.Errorf("dispatch: find subscribers: %w", err)
 	}

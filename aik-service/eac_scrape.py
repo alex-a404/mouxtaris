@@ -7,10 +7,10 @@ from zoneinfo import ZoneInfo
 import httpx
 from bs4 import BeautifulSoup
 
-BASE = ("https://www.eac.com.cy/EN/RegulatedActivities/Distribution/"
-        "PowerInterruptions/Pages/Faultsandscheduledinterruptions.aspx")
-
-DISTRICTS = {0: "Lefkosia", 1: "Lemesos", 2: "Larnaka", 3: "Pafos", 4: "Ammochostos"}
+# Site relaunched 2026-11: the old SharePoint page (one fetch per ?District=N)
+# now 301s here, and this single page lists every district, with the district
+# in its own "Province" column.
+BASE = "https://www.eac.com.cy/en/distribution/faults/"
 
 HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -24,17 +24,22 @@ HEADERS = {
 # it real headroom instead of retrying a slow-but-live server into a false
 # failure. Fewer retries than before since each one is now much pricier.
 TIMEOUT = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
-RETRIES_PER_DISTRICT = 3
+RETRIES = 3
 
 TZ = ZoneInfo("Asia/Nicosia")
 
 ZWSP = re.compile(r"[\u200b\u200c\u200d\u200e\u200f\ufeff]")
 WS   = re.compile(r"\s+")
-SECTION_RE  = re.compile(r"CURRENT OUTAGES|SCHEDULED INTERRUPTIONS", re.I)
-EMPTY_HINTS = ("there are not", "there are no", "δεν υπάρχουν")
+SECTION_RE  = re.compile(r"FAULTS|CURRENT OUTAGES|SCHEDULED INTERRUPTIONS", re.I)
+EMPTY_HINTS = ("there are not", "there are no", "no faults", "no scheduled", "δεν υπάρχουν")
 
 def clean(s: str) -> str:
     return WS.sub(" ", ZWSP.sub("", s or "")).strip()
+
+def cell(s: str) -> str:
+    """The new site fills empty cells with "-"; the resolver expects ""."""
+    s = clean(s)
+    return "" if s in ("-", "–", "—") else s
 
 MERIDIEM = {"π.μ.": "AM", "μ.μ.": "PM", "πμ": "AM", "μμ": "PM"}
 
@@ -74,56 +79,55 @@ def section_of(table) -> str | None:
         return None
     return "scheduled" if "SCHEDULED" in marker.upper() else "fault"
 
-def parse_page(html: str, district: str) -> list[EACRow]:
+def parse_page(html: str) -> list[EACRow]:
+    """Columns: Province | City - Village | Area | Area Section |
+    Interruption Date/Time | Expected Recovery."""
     soup, rows = BeautifulSoup(html, "html.parser"), []
     for table in soup.find_all("table"):
         head = clean(table.get_text(" ")).upper()
-        if "TOWN" not in head or "INTERRUPTION" not in head:
+        if "PROVINCE" not in head or "INTERRUPTION" not in head:
             continue
         sec = section_of(table)
         if sec is None:
             continue
         for tr in table.find_all("tr"):
-            cells = [clean(td.get_text(" ")) for td in tr.find_all("td")]
-            if len(cells) < 5:
+            cells = [cell(td.get_text(" ")) for td in tr.find_all("td")]
+            if len(cells) < 6:
                 continue
             joined = " ".join(cells).lower()
-            if any(h in joined for h in EMPTY_HINTS) or cells[0].upper().startswith("TOWN"):
+            if any(h in joined for h in EMPTY_HINTS):
                 continue
             rows.append(EACRow(
-                district=district, section=sec,
-                town_village=cells[0], area_subdistrict=cells[1], part_of_area=cells[2],
-                start_raw=cells[3], start=parse_dt(cells[3]),
-                est_restoration_raw=cells[4], est_restoration=parse_dt(cells[4]),
+                district=cells[0], section=sec,
+                town_village=cells[1], area_subdistrict=cells[2], part_of_area=cells[3],
+                start_raw=cells[4], start=parse_dt(cells[4]),
+                est_restoration_raw=cells[5], est_restoration=parse_dt(cells[5]),
             ).finish())
     return rows
 
-def fetch_district(client: httpx.Client, district_id: int) -> str | None:
-    for attempt in range(RETRIES_PER_DISTRICT):
+def fetch_page(client: httpx.Client) -> str:
+    for attempt in range(RETRIES):
         try:
-            r = client.get(BASE, params={"District": district_id})
+            r = client.get(BASE)
             r.raise_for_status()
             return r.text
         except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.TransportError) as e:
-            if attempt < RETRIES_PER_DISTRICT - 1:
+            if attempt < RETRIES - 1:
                 wait = min(2 ** attempt + random.uniform(0, 1), 30)
-                print(f"  district {district_id} attempt {attempt + 1} failed "
+                print(f"  attempt {attempt + 1} failed "
                       f"({type(e).__name__}); retry in {wait:.1f}s", file=sys.stderr)
                 time.sleep(wait)
             else:
-                print(f"  district {district_id} gave up after "
-                      f"{RETRIES_PER_DISTRICT} attempts ({type(e).__name__})", file=sys.stderr)
-    return None
+                raise
 
 def get_outages() -> List[dict]:
-    out = []
     with httpx.Client(headers=HEADERS, timeout=TIMEOUT, follow_redirects=True) as client:
-        for did, name in DISTRICTS.items():
-            html = fetch_district(client, did)
-            if html is None:
-                continue
-            out += parse_page(html, name or f"district_{did}")
-            time.sleep(1)
+        html = fetch_page(client)
+    if "Province" not in html:
+        # Layout changed again: fail the cycle rather than push an empty list,
+        # which would clear every live EAC outage on the dispatcher.
+        raise RuntimeError("EAC page has no outage tables; layout changed?")
+    out = parse_page(html)
     uniq = {}
     for row in out:
         uniq.setdefault(row.key, asdict(row))
@@ -161,7 +165,7 @@ def push(url: str, token: str, rows: List[dict]) -> None:
     print(payload)
 
 def cycle(url: str, token: str) -> None:
-    rows = get_outages()          # partial data on failure is fine
+    rows = get_outages()          # raises on fetch/layout failure; nothing pushed
     push(url, token, rows)
 
 def main() -> None:

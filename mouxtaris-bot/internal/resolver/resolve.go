@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"sort"
@@ -29,6 +30,7 @@ import (
 type Resolver struct {
 	places    []*place
 	byKey     map[string]*place
+	children  map[string][]string
 	minScore  float64
 	minMargin float64
 }
@@ -47,6 +49,7 @@ func New(areas []*Area) *Resolver {
 			level:    a.Level,
 			parent:   a.ParentKey, // may be pre-set by overrides; else computed below
 			variants: buildVariants(a),
+			aliases:  buildAliases(a.Aliases),
 			rings:    a.rings,
 		}
 		p.cx, p.cy, p.hasCentroid = centroid(a.rings)
@@ -56,6 +59,12 @@ func New(areas []*Area) *Resolver {
 	}
 	r.buildHierarchy()
 	r.dropOutsideCoverage()
+	r.children = make(map[string][]string)
+	for _, p := range r.places {
+		if p.parent != "" {
+			r.children[p.parent] = append(r.children[p.parent], p.key)
+		}
+	}
 	return r
 }
 
@@ -145,8 +154,8 @@ func (r *Resolver) Resolve(o outages.OutageReport) (key, name string, matchedSub
 		if text == "" {
 			continue
 		}
-		if p, ok := r.best(text, district); ok {
-			return p.key, displayName(p), f.isSubdistrict, true
+		if p, alias, ok := r.best(text, district); ok {
+			return p.key, aliasDisplay(p, alias, text), f.isSubdistrict, true
 		}
 		// Retry without a directional qualifier (Πάνω/Κάτω/Νέο/Παλαιό) the
 		// source appended but that has no dedicated sub-area in our data --
@@ -157,11 +166,15 @@ func (r *Resolver) Resolve(o outages.OutageReport) (key, name string, matchedSub
 		// so a place that DOES have a dedicated Kato/Pano feature already
 		// matched above and never reaches this fallback.
 		if stripped, ok := stripQualifier(text); ok {
-			if p, ok := r.best(stripped, district); ok {
-				return p.key, displayName(p), f.isSubdistrict, true
+			if p, alias, ok := r.best(stripped, district); ok {
+				return p.key, aliasDisplay(p, alias, text), f.isSubdistrict, true
 			}
 		}
 	}
+	// No district fallback: nobody subscribes at district level, so it would
+	// notify no one while hiding the miss from the resolve-failure metric.
+	// Unknown places (e.g. a colloquial neighbourhood) get an alias in
+	// overrides.json instead.
 	return "", "", false, false
 }
 
@@ -200,6 +213,62 @@ func (r *Resolver) Chain(areaKey string) []string {
 	return out
 }
 
+// Audience returns every area whose subscribers should hear about an outage
+// resolved to areaKey: the area itself and everything containing it (Chain),
+// plus everything inside it -- someone subscribed to Potamos Germasogeias must
+// hear about an outage announced for all of Germasogeia.
+//
+// The downward half also covers the area's same-named twins on the chain
+// (OSM models Limassol as both "Limassol" and "Limassol Municipality", and a
+// neighbourhood may hang under either), but never a district: an outage
+// resolved only to a district would otherwise reach every subscriber in it.
+func (r *Resolver) Audience(areaKey string) []string {
+	chain := r.Chain(areaKey)
+	out := append([]string(nil), chain...)
+	seen := make(map[string]bool, len(chain))
+	for _, k := range chain {
+		seen[k] = true
+	}
+	self, ok := r.byKey[areaKey]
+	if !ok {
+		return out
+	}
+	var walk func(k string)
+	walk = func(k string) {
+		for _, c := range r.children[k] {
+			if !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+				walk(c)
+			}
+		}
+	}
+	for _, k := range chain {
+		p, ok := r.byKey[k]
+		if !ok || p.level <= 5 {
+			continue
+		}
+		if p == self || r.sameName(self, p) {
+			walk(k)
+		}
+	}
+	return out
+}
+
+// sameName is the name-only half of coreferent: the two features carry
+// essentially the same name. Unlike coreferent it ignores nesting, which would
+// also pair Limassol with the enclosing East Limassol Municipality.
+func (r *Resolver) sameName(a, b *place) bool {
+	for _, va := range a.variants {
+		for _, vb := range b.variants {
+			if score(va, vb) >= corefSim {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 
 type place struct {
@@ -209,6 +278,10 @@ type place struct {
 	level    int
 	parent   string
 	variants [][]string
+	// aliases are hand-maintained extra names (overrides.json "aliases") for
+	// places OSM doesn't model, e.g. the Limassol neighbourhood "Αριέλ" filed
+	// under Limassol. A match on one keeps the raw name in the display.
+	aliases [][]string
 
 	rings                  [][][2]float64
 	cx, cy                 float64
@@ -237,6 +310,15 @@ func PrimaryName(name string) string {
 	return strings.TrimSpace(name)
 }
 
+// aliasDisplay is p's display name, followed by the source's own text when the
+// match came through a manual alias -- "Limassol - Αριέλ", not just "Limassol".
+func aliasDisplay(p *place, viaAlias bool, text string) string {
+	if !viaAlias {
+		return displayName(p)
+	}
+	return fmt.Sprintf("%s - %s", displayName(p), strings.TrimSpace(text))
+}
+
 func displayName(p *place) string {
 	if PrimaryName(p.nameEN) != "" {
 		return PrimaryName(p.nameEN)
@@ -246,10 +328,30 @@ func displayName(p *place) string {
 
 const tokenHit = 0.80
 
-func (r *Resolver) best(text, district string) (*place, bool) {
+// match scores query q (and its transliteration qLat, if any) against every
+// name of p, reporting whether the best score came from a manual alias.
+func (p *place) match(q, qLat []string) (best float64, viaAlias bool) {
+	try := func(vs [][]string, alias bool) {
+		for _, v := range vs {
+			for _, query := range [][]string{q, qLat} {
+				if len(query) == 0 {
+					continue
+				}
+				if sc := score(query, v); sc > best {
+					best, viaAlias = sc, alias
+				}
+			}
+		}
+	}
+	try(p.variants, false)
+	try(p.aliases, true)
+	return best, viaAlias
+}
+
+func (r *Resolver) best(text, district string) (*place, bool, bool) {
 	q := tokenise(text)
 	if len(q) == 0 {
-		return nil, false
+		return nil, false, false
 	}
 	// If the query is Greek, also prepare a transliterated form so it can match
 	// features that only have a Latin name (missing name:el).
@@ -260,22 +362,13 @@ func (r *Resolver) best(text, district string) (*place, bool) {
 	dkey := foldDistrict(district)
 
 	type scored struct {
-		s float64
-		p *place
+		s     float64
+		p     *place
+		alias bool
 	}
 	var cands []scored
 	for _, p := range r.places {
-		s := 0.0
-		for _, v := range p.variants {
-			if sc := score(q, v); sc > s {
-				s = sc
-			}
-			if len(qLat) > 0 {
-				if sc := score(qLat, v); sc > s {
-					s = sc
-				}
-			}
-		}
+		s, alias := p.match(q, qLat)
 		if s <= 0 {
 			continue
 		}
@@ -284,28 +377,17 @@ func (r *Resolver) best(text, district string) (*place, bool) {
 				continue
 			}
 		}
-		cands = append(cands, scored{s, p})
+		cands = append(cands, scored{s, p, alias})
 	}
 	if len(cands) == 0 && dkey != "" {
 		for _, p := range r.places {
-			s := 0.0
-			for _, v := range p.variants {
-				if sc := score(q, v); sc > s {
-					s = sc
-				}
-				if len(qLat) > 0 {
-					if sc := score(qLat, v); sc > s {
-						s = sc
-					}
-				}
-			}
-			if s > 0 {
-				cands = append(cands, scored{s * 0.9, p})
+			if s, alias := p.match(q, qLat); s > 0 {
+				cands = append(cands, scored{s * 0.9, p, alias})
 			}
 		}
 	}
 	if len(cands) == 0 {
-		return nil, false
+		return nil, false, false
 	}
 
 	sort.Slice(cands, func(i, j int) bool { return cands[i].s > cands[j].s })
@@ -321,7 +403,7 @@ func (r *Resolver) best(text, district string) (*place, bool) {
 
 	top := cands[0]
 	if top.s < r.minScore {
-		return nil, false
+		return nil, false, false
 	}
 
 	// collapse co-referent ties (same place at different admin levels); only a
@@ -329,7 +411,7 @@ func (r *Resolver) best(text, district string) (*place, bool) {
 	if len(cands) > 1 {
 		second := cands[1]
 		if top.s-second.s < r.minMargin && !r.coreferent(top.p, second.p) {
-			return nil, false
+			return nil, false, false
 		}
 	}
 	// if the winner is co-referent with a finer/coarser twin, prefer the finest
@@ -340,7 +422,12 @@ func (r *Resolver) best(text, district string) (*place, bool) {
 			winner = c.p
 		}
 	}
-	return winner, true
+	if top.alias {
+		// an alias names exactly the feature it was written on; don't swap it
+		// for a co-referent twin, whose display wouldn't be the one chosen
+		winner = top.p
+	}
+	return winner, top.alias, true
 }
 
 func score(query, cand []string) float64 {
@@ -516,17 +603,7 @@ func (r *Resolver) Search(text string, limit int) []SearchResult {
 	}
 	var cands []scored
 	for _, p := range r.places {
-		s := 0.0
-		for _, v := range p.variants {
-			if sc := score(q, v); sc > s {
-				s = sc
-			}
-			if len(qLat) > 0 {
-				if sc := score(qLat, v); sc > s {
-					s = sc
-				}
-			}
-		}
+		s, _ := p.match(q, qLat)
 		if s >= 0.40 {
 			cands = append(cands, scored{s, p})
 		}
@@ -906,20 +983,49 @@ func foldDistrict(s string) string {
 func buildVariants(a *Area) [][]string {
 	var vs [][]string
 	seen := map[string]bool{}
+	add := func(part string) {
+		toks := tokenise(part)
+		if len(toks) == 0 {
+			return
+		}
+		joined := strings.Join(toks, " ")
+		if !seen[joined] {
+			seen[joined] = true
+			vs = append(vs, toks)
+		}
+	}
 	for _, name := range []string{a.NameEL, a.NameEN} {
 		for _, part := range strings.Split(name, ";") {
-			toks := tokenise(part)
-			if len(toks) == 0 {
-				continue
-			}
-			joined := strings.Join(toks, " ")
-			if !seen[joined] {
-				seen[joined] = true
-				vs = append(vs, toks)
+			add(part)
+			// Also index a transliterated form of a Greek name. Resolve()
+			// already transliterates a *Greek query* so it can match a
+			// Latin-only name; this is the mirror image, for a *Latin query*
+			// against a name whose Greek carries a word the name:en drops --
+			// e.g. "Κοινότητα Πύργου Λεμεσού" has name:en "Pyrgos Community",
+			// so EAC's English "Pyrgos Lemesou" had no candidate token for
+			// "Lemesou" and scored 0.625, under minScore. Indexing
+			// "pyrgou lemesou" gives it one.
+			if hasGreek(part) {
+				add(greekToLatin(part))
 			}
 		}
 	}
 	return vs
+}
+
+func buildAliases(names []string) [][]string {
+	var out [][]string
+	for _, n := range names {
+		if toks := tokenise(n); len(toks) > 0 {
+			out = append(out, toks)
+		}
+		if hasGreek(n) {
+			if toks := tokenise(greekToLatin(n)); len(toks) > 0 {
+				out = append(out, toks)
+			}
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -932,8 +1038,9 @@ type Area struct {
 	NameEN    string
 	Level     int
 	ParentKey string
-	Lat, Lon  float64 // centroid; valid only if HasGeo
-	HasGeo    bool    // false for a manually added overrides.json entry with no polygon
+	Lat, Lon  float64  // centroid; valid only if HasGeo
+	HasGeo    bool     // false for a manually added overrides.json entry with no polygon
+	Aliases   []string // extra names from overrides.json, see place.aliases
 	rings     [][][2]float64
 }
 
@@ -957,6 +1064,7 @@ func LoadGeoJSON(geojsonPath, overridesPath string) ([]*Area, error) {
 		ParentKey *string  `json:"parent_key"`
 		Lat       *float64 `json:"lat"` // for a feature with no geometry to place on the map
 		Lon       *float64 `json:"lon"`
+		Aliases   []string `json:"aliases"`
 	}{}
 	if overridesPath != "" {
 		if ob, err := os.ReadFile(overridesPath); err == nil {
@@ -989,6 +1097,7 @@ func LoadGeoJSON(geojsonPath, overridesPath string) ([]*Area, error) {
 			if ov.Lat != nil && ov.Lon != nil {
 				a.Lat, a.Lon, a.HasGeo = *ov.Lat, *ov.Lon, true
 			}
+			a.Aliases = ov.Aliases
 		}
 		if a.NameEL == "" && a.NameEN == "" {
 			continue

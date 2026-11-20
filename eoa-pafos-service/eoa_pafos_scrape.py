@@ -203,8 +203,14 @@ Field rules:
   Διαμέρισμα Χ" -> "Χ"), or a village inside a merged municipality -- as a proper
   place name in nominative form. NOT a street. Only a name written in the text. Else "".
 - part_of_area: the street name(s) affected, and any other descriptive qualifier that
-  is not a place name (e.g. "περιοχή πίσω από το παλιό ΚΕΝ"). If several streets are
-  listed, include EVERY one, joined with ", ", not just the first. Else "".
+  is not a place name (e.g. "area behind the old KEN"). If several streets are
+  listed, include EVERY one, joined with ", ", not just the first.
+  Write this field in Latin script, as on Cyprus road signs: transliterate every
+  street name letter by letter (ELOT 743 -- "ΠΡΟΜΗΘΕΩΣ" -> "Promitheos", "Σταύρου
+  Βενιζέλου" -> "Stavrou Venizelou", "Λεωφόρος Μακαρίου Γ'" -> "Makariou III Avenue")
+  in Title Case, never translate a name's meaning, and translate the surrounding
+  descriptive words into English ("ανατολικά της οδού Χ" -> "east of X street").
+  Else "".
 - outage_cause: "fault" if the text mentions a fault/breakdown (βλάβη), otherwise
   "scheduled".
 - Dates: the text often gives relative days ("σήμερα" = today, "αύριο" = tomorrow,
@@ -231,7 +237,7 @@ Body: Ενημερώνουμε το κοινό ότι σήμερα, Παρασκ
 υδροδότησης στην Πέγεια, στην οδό Αγίας Ειρήνης. Η υδροδότηση αναμένεται να \
 επανέλθει αύριο, Σάββατο 01/08/2026.
 Output: {"outages": [{"town_village": "Πέγεια", "area_subdistrict": "", \
-"part_of_area": "Αγίας Ειρήνης", "outage_cause": "scheduled", "outage_from_date": "2026-07-31", \
+"part_of_area": "Agias Eirinis", "outage_cause": "scheduled", "outage_from_date": "2026-07-31", \
 "outage_from_time": "", "outage_to_date": "2026-08-01", "outage_to_time": ""}]}
 
 Example 2:
@@ -242,7 +248,7 @@ Body: Ενημερώνουμε το κοινό ότι σήμερα, Κυριακ
 από το παλιό ΚΕΝ Γεροσκήπου. Η βλάβη θα επιδιορθωθεί αύριο πρωί. \
 Ημερομηνία ανακοίνωσης: 26/07/2026, 14:56
 Output: {"outages": [{"town_village": "Γεροσκήπου", "area_subdistrict": "", \
-"part_of_area": "περιοχή πίσω από το παλιό ΚΕΝ Γεροσκήπου", "outage_cause": "fault", \
+"part_of_area": "area behind the old KEN of Geroskipou", "outage_cause": "fault", \
 "outage_from_date": "2026-07-26", "outage_from_time": "14:56", \
 "outage_to_date": "2026-07-27", "outage_to_time": ""}]}
 
@@ -411,6 +417,17 @@ def localize(date_s: str, time_s: str, default_time: str = "00:00") -> str:
         return ""
 
 
+def from_time_or_now(date_s: str, time_s: str) -> str:
+    """The start time to use for outage_from: the one the text gives, else --
+    when the outage starts today -- the moment we are reading the announcement
+    (a fault announced this morning reads as 09:25, not 00:00), else midnight."""
+    time_s = clean(time_s)
+    if time_s:
+        return time_s
+    now = datetime.now(TZ)
+    return now.strftime("%H:%M") if clean(date_s) == now.date().isoformat() else "00:00"
+
+
 # Generic place-type words the model sometimes keeps in front of a neighbourhood
 # name ("ενορία Αγίου Δημητρίου", "περιοχή Πάνθεα", "Δημοτικό Διαμέρισμα Κάτω
 # Πολεμιδιών"). The resolver token-matches the whole string against area names,
@@ -427,6 +444,19 @@ def clean_subdistrict(s: str) -> str:
     s = clean(s)
     return clean(_SUB_PREFIX.sub("", s)) or s
 
+def already_over(outage_to_iso: str) -> bool:
+    """True if outage_to is a real timestamp and it's already in the past --
+    a defensive net against pushing a resolved outage as newly "created"
+    (seen for real on the eoa_lefkosia source: a resolved row that the site
+    never removed/hid got re-extracted and pushed 2+ days stale)."""
+    if not outage_to_iso:
+        return False
+    try:
+        return datetime.fromisoformat(outage_to_iso) < datetime.now(TZ)
+    except ValueError:
+        return False
+
+
 def to_payloads(outages: list) -> List[dict]:
     payloads = []
     for o in outages:
@@ -435,6 +465,11 @@ def to_payloads(outages: list) -> List[dict]:
         town = clean(o.get("town_village", ""))
         if not town:
             continue  # unusable without a place to resolve against
+        outage_to = localize(o.get("outage_to_date", ""), o.get("outage_to_time", ""), "23:59")
+        if already_over(outage_to):
+            print(f"  skipping already-over outage for {town!r} (outage_to={outage_to})",
+                  file=sys.stderr)
+            continue
         cause = o.get("outage_cause")
         payloads.append({
             "source": "eoa_pafos",
@@ -444,10 +479,11 @@ def to_payloads(outages: list) -> List[dict]:
             "part_of_area": clean(o.get("part_of_area", "")),
             "outage_type": "water",
             "outage_cause": cause if cause in ("fault", "scheduled") else "scheduled",
-            "outage_from": localize(o.get("outage_from_date", ""), o.get("outage_from_time", "")),
+            "outage_from": localize(o.get("outage_from_date", ""),
+                                    from_time_or_now(o.get("outage_from_date", ""), o.get("outage_from_time", ""))),
             # a restoration date with no time means "within that day": end of day,
             # never 00:00, which would read as restored before the outage began
-            "outage_to": localize(o.get("outage_to_date", ""), o.get("outage_to_time", ""), "23:59"),
+            "outage_to": outage_to,
         })
     return payloads
 
